@@ -9,4 +9,3 @@ CMakeLists.txt.user
 # === Build Folders ===
 build/
 .vscode/
-.gitignore
