@@ -1,0 +1,11 @@
+# === Qt Creator User Files (本地配置，绝对不能上传) ===
+*.pro.user
+*.pro.user.*
+CMakeLists.txt.user
+*.aps
+*.idb
+
+
+# === Build Folders ===
+build/
+.vscode/

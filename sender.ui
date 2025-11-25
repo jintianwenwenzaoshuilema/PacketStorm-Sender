@@ -1,0 +1,594 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>460</width>
+    <height>720</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Packet Storm</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">
+QMainWindow, QWidget {
+        background-color: #1E1E1E;
+        color: #F0F0F0;
+        font-family: &quot;Segoe UI&quot;, sans-serif;
+}
+
+QGroupBox {
+        border: 1px solid #444;
+        border-radius: 6px;
+        margin-top: 24px;
+        font-weight: bold;
+        color: #64B5F6;
+        background-color: transparent;
+}
+
+QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 5px;
+}
+
+QLabel {
+        color: #CCCCCC;
+        background-color: transparent;
+}
+
+QLineEdit, QSpinBox, QComboBox {
+        background-color: #2D2D30;
+        border: 1px solid #3E3E42;
+        border-radius: 4px;
+        padding: 6px;
+        color: #F0F0F0;
+        selection-background-color: #007ACC;
+}
+
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+        border: 1px solid #64B5F6;
+}
+
+QComboBox QAbstractItemView {
+        background-color: #2D2D30;
+        color: #F0F0F0;
+        border: 1px solid #3E3E42;
+        selection-background-color: #007ACC;
+}
+
+/* === 单选框 (Radio Button) 样式优化 === */
+QRadioButton {
+    color: white;            /* 文字颜色：纯白 */
+    spacing: 8px;            /* 图标和文字的间距 */
+    font-size: 13px;         /* 字号 */
+}
+
+/* 指示器（那个圆圈）的基础样式 */
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 9px;      /* 半径设为宽度的一半，使其变成正圆 */
+    border: 2px solid #888;  /* 未选中时：灰色边框 */
+    background-color: transparent;
+}
+
+/* 选中时的样式 */
+QRadioButton::indicator:checked {
+    background-color: white; /* 选中时：填充白色 */
+    border: 2px solid white; /* 边框也变白 */
+}
+
+/* 鼠标悬停时的样式 */
+QRadioButton::indicator:hover {
+    border-color: #DDD;      /* 鼠标放上去时边框变亮 */
+}
+
+QPushButton {
+        background-color: #333337;
+        border: none;
+        border-radius: 4px;
+        padding: 10px;
+        color: white;
+        font-weight: bold;
+        font-size: 13px;
+}
+
+QPushButton:hover {
+        background-color: #454548;
+}
+
+QPushButton:disabled {
+        background-color: #2D2D30;
+        color: #555;
+}
+
+/* 复选框整体文字颜色 */
+QCheckBox {
+    color: #FFFFFF;       /* 白色文字 */
+    spacing: 5px;         /* 文字和框的间距 */
+    font-size: 12px;
+}
+
+/* === 指示器（那个方框）的基础样式 === */
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+
+    /* 核心设置：白色边框，2像素宽 */
+    border: 2px solid #FFFFFF;
+
+    /* 圆角设置：2px 为微圆角，0px 为直角，根据喜好调整 */
+    border-radius: 2px;
+
+    /* 背景透明，只显示白框 */
+    background-color: transparent;
+}
+
+/* 鼠标悬停时：边框稍微变暗，提供反馈 */
+QCheckBox::indicator:hover {
+    border-color: #DDDDDD;
+}
+
+/* === 选中状态 === */
+QCheckBox::indicator:checked {
+    /* 选中时：填充为纯白色 (实心白块风格) */
+    background-color: #FFFFFF;
+    border-color: #FFFFFF;
+
+    /* 如果您有勾选图标资源，可以用 image: url(...)，
+       但在扁平化深色主题中，实心白块通常代表“选中”，非常清晰且无需图标 */
+    image: none;
+}
+
+/* (可选) 半选状态：如果未来用到 Tri-state */
+QCheckBox::indicator:indeterminate {
+    background-color: #888888;
+    border-color: #FFFFFF;
+}
+
+/* 特定按钮颜色 */
+QPushButton#btnStartSend { background-color: #2E7D32; }
+QPushButton#btnStartSend:hover { background-color: #388E3C; }
+QPushButton#btnStartSend:disabled { background-color: #1B5E20; color: #666; }
+
+QPushButton#btnStopSend { background-color: #C62828; }
+QPushButton#btnStopSend:hover { background-color: #D32F2F; }
+QPushButton#btnStopSend:disabled { background-color: #581515; color: #666; }
+
+QPushButton#btnStartRx { background-color: #0069C0; }
+QPushButton#btnStartRx:hover { background-color: #2196F3; }
+QPushButton#btnStartRx:disabled { background-color: #0D47A1; color: #666; }
+
+QPushButton#btnStopRx { background-color: #C62828; }
+QPushButton#btnStopRx:hover { background-color: #D32F2F; }
+QPushButton#btnStopRx:disabled { background-color: #581515; color: #666; }
+
+/* 统计大字体 */
+QLabel#lblRxCount1 { color: #00E676; font-size: 36px; font-weight: bold; }
+QLabel#lblRxCount2 { color: #FFCA28; font-size: 36px; font-weight: bold; }
+QLabel#lblDelayVal { color: #29B6F6; font-size: 36px; font-weight: bold; }
+
+QFrame#frameStat1, QFrame#frameStat2, QFrame#frameStat3 {
+        background-color: #2D2D30;
+        border-radius: 8px;
+}
+   </string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QHBoxLayout" name="horizontalLayout_Main">
+    <property name="spacing">
+     <number>20</number>
+    </property>
+    <property name="leftMargin">
+     <number>20</number>
+    </property>
+    <property name="topMargin">
+     <number>20</number>
+    </property>
+    <property name="rightMargin">
+     <number>20</number>
+    </property>
+    <property name="bottomMargin">
+     <number>20</number>
+    </property>
+    <item>
+     <widget class="QGroupBox" name="grpSender">
+      <property name="minimumSize">
+       <size>
+        <width>420</width>
+        <height>0</height>
+       </size>
+      </property>
+      <property name="maximumSize">
+       <size>
+        <width>420</width>
+        <height>16777215</height>
+       </size>
+      </property>
+      <property name="title">
+       <string>Sender Mode</string>
+      </property>
+      <layout class="QVBoxLayout" name="verticalLayout_Left">
+       <property name="spacing">
+        <number>15</number>
+       </property>
+       <item>
+        <widget class="QLabel" name="lblTxInt">
+         <property name="text">
+          <string>Interface Selection:</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QComboBox" name="comboInterfaceTx">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>35</height>
+          </size>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="grpAddr">
+         <property name="title">
+          <string>Address &amp; Protocol</string>
+         </property>
+         <layout class="QFormLayout" name="formLayout">
+          <property name="verticalSpacing">
+           <number>12</number>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="l1">
+            <property name="text">
+             <string>Src MAC:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="editSrcMac">
+            <property name="text">
+             <string>C8:A3:62:21:99:14</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="l2">
+            <property name="text">
+             <string>Dst MAC:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QLineEdit" name="editDstMac">
+            <property name="text">
+             <string>50:D2:F5:BE:20:3A</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="l3">
+            <property name="text">
+             <string>Src IP:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QLineEdit" name="editSrcIp">
+            <property name="text">
+             <string>192.168.1.203</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="l4">
+            <property name="text">
+             <string>Dst IP:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QLineEdit" name="editDstIp">
+            <property name="text">
+             <string>192.168.1.1</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+
+       <item>
+        <widget class="QGroupBox" name="grpParam">
+         <property name="title">
+          <string>Parameters</string>
+         </property>
+         <layout class="QVBoxLayout" name="vlParam">
+          <property name="spacing">
+           <number>10</number>
+          </property>
+          <item>
+           <layout class="QHBoxLayout" name="hlProto">
+            <item>
+             <widget class="QRadioButton" name="rbIcmp">
+              <property name="text">
+               <string>ICMP</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QRadioButton" name="rbUdp">
+              <property name="text">
+               <string>UDP</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QRadioButton" name="rbTcp">
+              <property name="text">
+               <string>TCP</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QRadioButton" name="rbDns">
+              <property name="text">
+               <string>DNS</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+
+
+
+<item>
+<widget class="QWidget" name="containerTcpFlags">
+    <property name="visible">
+        <bool>false</bool>
+    </property>
+    <layout class="QHBoxLayout" name="hlTcpFlags">
+        <property name="topMargin"><number>5</number></property>
+        <property name="bottomMargin"><number>5</number></property>
+        <property name="spacing"><number>15</number></property>
+
+        <item>
+            <widget class="QLabel" name="lblFlags">
+                <property name="text"><string>Flags:</string></property>
+                <property name="styleSheet"><string>color: #E0E0E0; font-weight: bold;</string></property>
+            </widget>
+        </item>
+
+        <item>
+            <widget class="QCheckBox" name="chkSyn">
+                <property name="text"><string>SYN</string></property>
+                <property name="checked"><bool>false</bool></property>
+                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+            </widget>
+        </item>
+        <item>
+            <widget class="QCheckBox" name="chkAck">
+                <property name="text"><string>ACK</string></property>
+                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+            </widget>
+        </item>
+        <item>
+            <widget class="QCheckBox" name="chkPsh">
+                <property name="text"><string>PSH</string></property>
+                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+            </widget>
+        </item>
+        <item>
+            <widget class="QCheckBox" name="chkFin">
+                <property name="text"><string>FIN</string></property>
+                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+            </widget>
+        </item>
+        <item>
+            <widget class="QCheckBox" name="chkRst">
+                <property name="text"><string>RST</string></property>
+                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+            </widget>
+        </item>
+
+        <item>
+            <spacer name="spacerFlags">
+                <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+            </spacer>
+        </item>
+    </layout>
+</widget>
+</item>
+
+<item>
+ <widget class="QWidget" name="containerDns">
+  <property name="visible">
+   <bool>false</bool>
+  </property>
+  <layout class="QHBoxLayout" name="hlDns">
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>5</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>5</number></property>
+
+   <item>
+    <widget class="QLabel" name="lblDomain">
+     <property name="text"><string>Domain:</string></property>
+     <property name="styleSheet"><string>color: #E0E0E0; font-weight: bold;</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLineEdit" name="editDomain">
+     <property name="text"><string>www.google.com</string></property>
+     <property name="placeholderText"><string>e.g. example.com</string></property>
+     <property name="styleSheet"><string>background-color: #2D2D30; color: #F0F0F0; border: 1px solid #3E3E42; padding: 4px;</string></property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+</item>
+
+
+          <item>
+           <layout class="QFormLayout" name="formLayout_Param">
+            <property name="labelAlignment">
+             <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+            <item row="0" column="0">
+             <widget class="QLabel" name="lblIntVal">
+              <property name="text">
+               <string>Interval (µs):</string>
+              </property>
+             </widget>
+            </item>
+            <item row="0" column="1">
+             <widget class="QSpinBox" name="spinInterval">
+              <property name="maximum">
+               <number>10000000</number>
+              </property>
+              <property name="singleStep">
+               <number>1000</number>
+              </property>
+              <property name="value">
+               <number>10000</number>
+              </property>
+             </widget>
+            </item>
+            <item row="1" column="0">
+             <widget class="QLabel" name="lblSPort">
+              <property name="text">
+               <string>Src Port:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="1" column="1">
+             <widget class="QSpinBox" name="spinSrcPort">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="minimum">
+               <number>1</number>
+              </property>
+              <property name="maximum">
+               <number>65535</number>
+              </property>
+              <property name="value">
+               <number>10086</number>
+              </property>
+             </widget>
+            </item>
+            <item row="2" column="0">
+             <widget class="QLabel" name="lblDPort">
+              <property name="text">
+               <string>Dst Port:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="2" column="1">
+             <widget class="QSpinBox" name="spinDstPort">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="minimum">
+               <number>1</number>
+              </property>
+              <property name="maximum">
+               <number>65535</number>
+              </property>
+              <property name="value">
+               <number>10086</number>
+              </property>
+             </widget>
+            </item>
+            <item row="3" column="0">
+             <widget class="QLabel" name="lblLen">
+              <property name="text">
+               <string>Payload Len:</string>
+              </property>
+             </widget>
+            </item>
+            <item row="3" column="1">
+             <widget class="QSpinBox" name="spinPktLen">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="minimum">
+               <number>1</number>
+              </property>
+              <property name="maximum">
+               <number>1400</number>
+              </property>
+              <property name="value">
+               <number>86</number>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="hlBtnTx">
+         <item>
+          <widget class="QPushButton" name="btnStartSend">
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>50</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>START SENDING</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnStopSend">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>50</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>STOP</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <spacer name="spacerLeft">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
