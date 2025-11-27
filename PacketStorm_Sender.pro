@@ -1,4 +1,4 @@
-QT += core gui charts
+QT += core gui
 
 
 

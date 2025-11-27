@@ -349,94 +349,91 @@ QFrame#frameStat1, QFrame#frameStat2, QFrame#frameStat3 {
            </layout>
           </item>
 
+          <item>
+          <widget class="QWidget" name="containerTcpFlags">
+              <property name="visible">
+                  <bool>false</bool>
+              </property>
+              <layout class="QHBoxLayout" name="hlTcpFlags">
+                  <property name="topMargin"><number>5</number></property>
+                  <property name="bottomMargin"><number>5</number></property>
+                  <property name="spacing"><number>15</number></property>
 
+                  <item>
+                      <widget class="QLabel" name="lblFlags">
+                          <property name="text"><string>Flags:</string></property>
+                          <property name="styleSheet"><string>color: #E0E0E0; font-weight: bold;</string></property>
+                      </widget>
+                  </item>
 
-<item>
-<widget class="QWidget" name="containerTcpFlags">
-    <property name="visible">
-        <bool>false</bool>
-    </property>
-    <layout class="QHBoxLayout" name="hlTcpFlags">
-        <property name="topMargin"><number>5</number></property>
-        <property name="bottomMargin"><number>5</number></property>
-        <property name="spacing"><number>15</number></property>
+                  <item>
+                      <widget class="QCheckBox" name="chkSyn">
+                          <property name="text"><string>SYN</string></property>
+                          <property name="checked"><bool>false</bool></property>
+                          <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+                      </widget>
+                  </item>
+                  <item>
+                      <widget class="QCheckBox" name="chkAck">
+                          <property name="text"><string>ACK</string></property>
+                          <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+                      </widget>
+                  </item>
+                  <item>
+                      <widget class="QCheckBox" name="chkPsh">
+                          <property name="text"><string>PSH</string></property>
+                          <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+                      </widget>
+                  </item>
+                  <item>
+                      <widget class="QCheckBox" name="chkFin">
+                          <property name="text"><string>FIN</string></property>
+                          <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+                      </widget>
+                  </item>
+                  <item>
+                      <widget class="QCheckBox" name="chkRst">
+                          <property name="text"><string>RST</string></property>
+                          <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
+                      </widget>
+                  </item>
 
-        <item>
-            <widget class="QLabel" name="lblFlags">
-                <property name="text"><string>Flags:</string></property>
-                <property name="styleSheet"><string>color: #E0E0E0; font-weight: bold;</string></property>
-            </widget>
-        </item>
+                  <item>
+                      <spacer name="spacerFlags">
+                          <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+                      </spacer>
+                  </item>
+              </layout>
+          </widget>
+          </item>
 
-        <item>
-            <widget class="QCheckBox" name="chkSyn">
-                <property name="text"><string>SYN</string></property>
-                <property name="checked"><bool>false</bool></property>
-                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
-            </widget>
-        </item>
-        <item>
-            <widget class="QCheckBox" name="chkAck">
-                <property name="text"><string>ACK</string></property>
-                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
-            </widget>
-        </item>
-        <item>
-            <widget class="QCheckBox" name="chkPsh">
-                <property name="text"><string>PSH</string></property>
-                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
-            </widget>
-        </item>
-        <item>
-            <widget class="QCheckBox" name="chkFin">
-                <property name="text"><string>FIN</string></property>
-                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
-            </widget>
-        </item>
-        <item>
-            <widget class="QCheckBox" name="chkRst">
-                <property name="text"><string>RST</string></property>
-                <property name="cursor"><cursorShape>PointingHandCursor</cursorShape></property>
-            </widget>
-        </item>
+          <item>
+           <widget class="QWidget" name="containerDns">
+            <property name="visible">
+             <bool>false</bool>
+            </property>
+            <layout class="QHBoxLayout" name="hlDns">
+             <property name="leftMargin"><number>0</number></property>
+             <property name="topMargin"><number>5</number></property>
+             <property name="rightMargin"><number>0</number></property>
+             <property name="bottomMargin"><number>5</number></property>
 
-        <item>
-            <spacer name="spacerFlags">
-                <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
-            </spacer>
-        </item>
-    </layout>
-</widget>
-</item>
-
-<item>
- <widget class="QWidget" name="containerDns">
-  <property name="visible">
-   <bool>false</bool>
-  </property>
-  <layout class="QHBoxLayout" name="hlDns">
-   <property name="leftMargin"><number>0</number></property>
-   <property name="topMargin"><number>5</number></property>
-   <property name="rightMargin"><number>0</number></property>
-   <property name="bottomMargin"><number>5</number></property>
-
-   <item>
-    <widget class="QLabel" name="lblDomain">
-     <property name="text"><string>Domain:</string></property>
-     <property name="styleSheet"><string>color: #E0E0E0; font-weight: bold;</string></property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QLineEdit" name="editDomain">
-     <property name="text"><string>www.google.com</string></property>
-     <property name="placeholderText"><string>e.g. example.com</string></property>
-     <property name="styleSheet"><string>background-color: #2D2D30; color: #F0F0F0; border: 1px solid #3E3E42; padding: 4px;</string></property>
-    </widget>
-   </item>
-  </layout>
- </widget>
-</item>
-
+             <item>
+              <widget class="QLabel" name="lblDomain">
+               <property name="text"><string>Domain:</string></property>
+               <property name="styleSheet"><string>color: #E0E0E0; font-weight: bold;</string></property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLineEdit" name="editDomain">
+               <property name="text"><string>www.google.com</string></property>
+               <property name="placeholderText"><string>e.g. example.com</string></property>
+               <property name="styleSheet"><string>background-color: #2D2D30; color: #F0F0F0; border: 1px solid #3E3E42; padding: 4px;</string></property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
 
           <item>
            <layout class="QFormLayout" name="formLayout_Param">
