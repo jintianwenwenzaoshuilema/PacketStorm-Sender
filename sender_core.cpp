@@ -599,15 +599,18 @@ timeval add_stamp(timeval* ptv, unsigned int dus)
     }
     return *ptv;
 }
-
-// === 修改后的 send_queue (完整内容) ===
-// 注意：保留了 seq_counter 的引用传递
-void send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, unsigned int &seq_counter)
+/* === 修改后的 send_queue (内存池化版) === */
+void send_queue(
+    pcap_t* fp,
+    unsigned int npacks,
+    const SenderConfig* cfg,
+    unsigned int &seq_counter,
+    // === 新增：接收预分配的资源 ===
+    pcap_send_queue* squeue,
+    unsigned char* shared_buffer
+    )
 {
     unsigned int i;
-    pcap_send_queue* squeue;
-    const int MaxPacketLen = 10000;
-
     struct pcap_pkthdr mpktheader;
     struct pcap_pkthdr* pktheader = &mpktheader;
 
@@ -615,22 +618,18 @@ void send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, unsign
     tv.tv_sec = 0;
     tv.tv_usec = 0;
 
-    squeue = pcap_sendqueue_alloc((unsigned int)((MaxPacketLen + sizeof(struct pcap_pkthdr)) * npacks));
-    if (!squeue) {
-        printf("pcap_sendqueue_alloc failed\n");
-        return;
-    }
+    // === 核心优化：重置队列长度实现复用，而不是重新分配内存 ===
+    squeue->len = 0;
 
-    unsigned char* package = new unsigned char[10000]();
     int package_len = 0;
 
     for (i = 0; i < npacks; i++)
     {
-        // 调用 build_package，传入结构体指针
+        // 使用传入的共享 buffer 构建包，避免反复 new/delete
         build_package(
-            package,
+            shared_buffer,
             &package_len,
-            (int)seq_counter++, // 序列号自增
+            (int)seq_counter++,
             cfg
             );
 
@@ -640,25 +639,30 @@ void send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, unsign
         pktheader->caplen = (bpf_u_int32)package_len;
         pktheader->len = (bpf_u_int32)package_len;
 
-        if (pcap_sendqueue_queue(squeue, pktheader, package) == -1)
+        // 将包加入队列
+        // 注意：pcap_sendqueue_queue 会将数据拷贝到 squeue 内部的 buffer 中
+        if (pcap_sendqueue_queue(squeue, pktheader, shared_buffer) == -1)
         {
-            printf("packet buffer too small, queue failed.\n");
-            delete[] package;
-            pcap_sendqueue_destroy(squeue);
+            printf("packet buffer too small, queue failed (buffer full).\n");
+            // 这里直接返回，不销毁 squeue，因为它是外部管理的
             return;
         }
 
-        add_stamp(&tv, cfg->send_interval_us); // 使用 cfg 中的间隔
+        add_stamp(&tv, cfg->send_interval_us);
         pktheader->ts = tv;
     }
 
-    delete[] package;
-
+    // 批量发送
+    // Sync=1 表示同步发送 (虽然在某些平台此参数可能被忽略，但在 WinPcap 中通常设为 1 或 0)
     int send_num = pcap_sendqueue_transmit(fp, squeue, 1);
-    // (日志输出可保留或注释)
-    pcap_sendqueue_destroy(squeue);
-}
 
+    // (可选) 错误日志，高频发送时建议注释掉以减少 I/O 开销
+    /*
+    if ((unsigned int)send_num < squeue->len) {
+        printf("transmit error: sent %d of %u\n", send_num, squeue->len);
+    }
+    */
+}
 
 /* 网卡选择函数 */
 
@@ -737,12 +741,33 @@ char* get_interface_name(int interface_idx)
 }
 
 
+/* === 新增辅助函数：高精度混合等待 === */
+// 结合了 sleep (让出CPU) 和 自旋锁 (高精度)
+static void precise_sleep_until(std::chrono::steady_clock::time_point target_time) {
+    auto now = std::chrono::steady_clock::now();
+
+    // 如果已经超时，直接返回，避免卡死
+    if (now >= target_time) return;
+
+    auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(target_time - now).count();
+
+    // 策略：如果剩余时间 > 2ms，先 sleep 挂起线程节省 CPU
+    // Windows 的 sleep 精度通常在 1ms-15ms，预留 2ms 安全空间
+    if (remaining > 2000) {
+        std::this_thread::sleep_for(std::chrono::microseconds(remaining - 2000));
+        now = std::chrono::steady_clock::now();
+    }
+
+    // 剩余的微秒级时间，使用 while 循环 (Spin Wait) 死等，以达到最高精度
+    while (now < target_time) {
+        std::this_thread::yield(); // 轻微让出时间片，防止彻底锁死核心
+        now = std::chrono::steady_clock::now();
+    }
+}
 
 
 
-
-/* 发包模式入口 对外接口 */
-// === 修改后的 start_send_mode (完整内容) ===
+/* === 修改后的 start_send_mode (入口函数) === */
 extern "C" void start_send_mode(const SenderConfig* config)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -752,53 +777,78 @@ extern "C" void start_send_mode(const SenderConfig* config)
         return;
     }
 
-    pcap_t* handler = pcap_open(config->dev_name,
-                                65535,
-                                PCAP_OPENFLAG_PROMISCUOUS,
-                                3000,
-                                NULL,
-                                errbuf);
+    // 打开网卡，设置超时 mintime 为 1ms (有助于提高响应速度)
+    pcap_t* handler = pcap_open(config->dev_name, 65535, PCAP_OPENFLAG_PROMISCUOUS, 1, NULL, errbuf);
     if (!handler) {
         printf("err in pcap_open (%s): %s\n", config->dev_name, errbuf);
         return;
     }
-    std::cout << "Starting send on " << config->dev_name << "..." << std::endl;
+    std::cout << "Starting optimized send on " << config->dev_name << "..." << std::endl;
 
-    // === 创建本地配置副本 ===
-    // 目的：防止多线程下外部修改了 config 指向的内容导致崩溃或数据不一致
+    // 本地配置副本
     SenderConfig cfg = *config;
 
-    // 计算批次
+    // --- 计算批次参数 ---
+    // 目标：每批次大约占用 1秒，或者达到队列上限
     unsigned int target_batch_time_us = 1000000; // 1s
     unsigned int safe_interval = (cfg.send_interval_us == 0) ? 1 : cfg.send_interval_us;
     unsigned int npacks = target_batch_time_us / safe_interval;
 
+    // 限制批次大小：
+    // 1. 至少发1个包
+    // 2. 最多发2000个包 (防止队列过大占用过多内存或导致点击 Stop 响应迟钝)
     if (npacks < 1) npacks = 1;
-    if (npacks > 1000) npacks = 1000;
+    if (npacks > 2000) npacks = 2000;
 
-    long long expected_duration_us = (long long)npacks * cfg.send_interval_us;
-    unsigned int current_seq_num = 1;
+    // 计算这批包理论上应该消耗的总时间
+    long long batch_duration_us = (long long)npacks * cfg.send_interval_us;
 
-    while (g_is_sending) {
-        auto start_time = std::chrono::steady_clock::now();
+    // === 优化 #1：内存池预分配 ===
 
-        // 调用 send_queue，传入结构体指针
-        send_queue(handler, npacks, &cfg, current_seq_num);
+    // 1. 预分配包构建缓冲区 (10KB足够容纳最大 Jumbo Frame)
+    // 引入 <vector> 头文件: #include <vector>
+    std::vector<unsigned char> shared_buffer(10000, 0);
 
-        auto end_time = std::chrono::steady_clock::now();
-        long long elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+    // 2. 预分配 WinPcap 发送队列内存
+    // 计算公式：(最大包长 + 包头结构体大小) * 包数量
+    unsigned int queue_mem_size = (10000 + sizeof(struct pcap_pkthdr)) * npacks;
+    pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
 
-        if (elapsed_us < expected_duration_us) {
-            long long sleep_us = expected_duration_us - elapsed_us;
-            if (sleep_us > 100) {
-                std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
-            }
-        }
-        if (expected_duration_us == 0) std::this_thread::yield();
+    if (!squeue) {
+        printf("Failed to allocate pcap_send_queue memory!\n");
+        pcap_close(handler);
+        return;
     }
 
+    unsigned int current_seq_num = 1;
+
+    // === 优化 #3：初始化时间基准 ===
+    auto next_wake_time = std::chrono::steady_clock::now();
+
+    while (g_is_sending) {
+        // 计算下一轮循环的理论唤醒时间点
+        // 使用 += 累加方式，确保长期运行不会产生时间漂移
+        next_wake_time += std::chrono::microseconds(batch_duration_us);
+
+        // 调用 send_queue (传入预分配的 squeue 和 buffer)
+        send_queue(handler, npacks, &cfg, current_seq_num, squeue, shared_buffer.data());
+
+        // 使用高精度等待直到目标时间点
+        precise_sleep_until(next_wake_time);
+
+        // 特殊处理：如果发送间隔为0 (全速发送)，则无需等待，但需要 yield 防止死锁
+        if (batch_duration_us == 0) {
+            std::this_thread::yield();
+            next_wake_time = std::chrono::steady_clock::now(); // 全速模式下重置基准时间
+        }
+    }
+
+    // === 资源清理 ===
+    if (squeue) {
+        pcap_sendqueue_destroy(squeue);
+    }
     pcap_close(handler);
-    printf("Sending stopped.\n");
+    printf("Sending stopped gracefully.\n");
 }
 
 
