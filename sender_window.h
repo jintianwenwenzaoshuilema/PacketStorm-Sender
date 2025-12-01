@@ -5,6 +5,8 @@
 #include <QTimer>
 #include <QRegularExpression>
 #include "sender_core.h" // 包含新的结构体定义
+#include <QPropertyAnimation>
+#include <QGraphicsDropShadowEffect>
 
 namespace Ui {
 class MainWindow;
@@ -55,10 +57,13 @@ private slots:
     void onProtoToggled();
     void onPayloadModeChanged(); // <--- 新增槽函数
 
+
 private:
     void loadInterfaces();
 
     Ui::MainWindow *ui;
     QThread *workerThread;
     PacketWorker *worker;
+    QPropertyAnimation *stopBtnAnim;
+    QGraphicsDropShadowEffect *stopBtnEffect;
 };

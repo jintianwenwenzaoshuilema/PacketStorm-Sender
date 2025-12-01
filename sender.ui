@@ -15,146 +15,178 @@
   </property>
   <property name="styleSheet">
    <string notr="true">
-QMainWindow, QWidget {
-        background-color: #1E1E1E;
-        color: #F0F0F0;
-        font-family: &quot;Segoe UI&quot;, sans-serif;
-}
+   /* =======================================================
+      GLOBAL SETTINGS (全局设置)
+      强制所有控件使用 JetBrains Mono，营造终端感
+      ======================================================= */
+   * {
+       font-family: "JetBrains Mono", "Consolas", monospace;
+       font-size: 13px;
+       color: #a0a8b7; /* 默认文字颜色：灰白，避免刺眼 */
+   }
 
-QGroupBox {
-        border: 1px solid #444;
-        border-radius: 6px;
-        margin-top: 24px;
-        font-weight: bold;
-        color: #64B5F6;
-        background-color: transparent;
-}
+   QMainWindow, QWidget {
+       background-color: #0b0f19; /* 极深蓝黑色背景 */
+   }
 
-QGroupBox::title {
-        subcontrol-origin: margin;
-        left: 12px;
-        padding: 0 5px;
-}
+   /* =======================================================
+      GROUP BOX (分组框 - 模块化设计)
+      科技感的细边框，青色标题
+      ======================================================= */
+   QGroupBox {
+       border: 1px solid #1c2333; /* 暗淡的边框 */
+       border-radius: 4px;
+       margin-top: 24px; /* 为标题留出空间 */
+       padding-top: 10px;
+       background-color: #0f121a; /* 比背景稍亮，形成层级 */
+   }
 
-QLabel {
-        color: #CCCCCC;
-        background-color: transparent;
-}
+   QGroupBox::title {
+       subcontrol-origin: margin;
+       subcontrol-position: top left;
+       left: 10px;
+       padding: 0 6px;
+       color: #00f0ff; /* 赛博朋克核心色：青色 */
+       font-weight: bold;
+       background-color: #0b0f19; /* 遮挡住边框线 */
+   }
 
-QLineEdit, QSpinBox, QComboBox {
-        background-color: #2D2D30;
-        border: 1px solid #3E3E42;
-        border-radius: 4px;
-        padding: 6px;
-        color: #F0F0F0;
-        selection-background-color: #007ACC;
-}
+   /* =======================================================
+      LABELS (标签)
+      稍微调暗，让数据更突出
+      ======================================================= */
+   QLabel {
+       color: #718096;
+       font-weight: normal;
+   }
 
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-        border: 1px solid #64B5F6;
-}
+   /* =======================================================
+      INPUT FIELDS (输入框 - 核心数据区)
+      黑底、亮字、底部发光线条
+      ======================================================= */
+   QLineEdit, QSpinBox, QComboBox {
+       background-color: #111625;
+       border: 1px solid #2d3748;
+       border-bottom: 2px solid #2d3748; /* 默认底部暗色 */
+       border-radius: 2px;
+       color: #00f0ff; /* 输入的数据显示为高亮青色 */
+       padding: 6px;
+       selection-background-color: #00f0ff;
+       selection-color: #000000;
+   }
 
-QComboBox QAbstractItemView {
-        background-color: #2D2D30;
-        color: #F0F0F0;
-        border: 1px solid #3E3E42;
-        selection-background-color: #007ACC;
-}
+   /* 鼠标悬停 */
+   QLineEdit:hover, QSpinBox:hover, QComboBox:hover {
+       background-color: #151a2b;
+       border-color: #4a5568;
+   }
 
-QRadioButton {
-    color: white;
-    spacing: 8px;
-    font-size: 13px;
-}
+   /* 获得焦点（输入时）：底部线条变亮，产生通电感 */
+   QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+       background-color: #151a2b;
+       border: 1px solid #00f0ff; /* 全边框发光 */
+       border-bottom: 2px solid #00f0ff;
+       color: #ffffff; /* 输入时文字变白，更清晰 */
+   }
 
-QRadioButton::indicator {
-    width: 16px;
-    height: 16px;
-    border-radius: 9px;
-    border: 2px solid #888;
-    background-color: transparent;
-}
+   /* 下拉框弹出的列表样式 */
+   QComboBox QAbstractItemView {
+       background-color: #111625;
+       color: #00f0ff;
+       border: 1px solid #2d3748;
+       selection-background-color: #2d3748;
+       selection-color: #00f0ff;
+   }
 
-QRadioButton::indicator:checked {
-    background-color: white;
-    border: 2px solid white;
-}
+   /* =======================================================
+      RADIO  CHECKBOX (单选/复选框)
+      自定义绘制，去除系统默认的土气样式
+      ======================================================= */
+   QRadioButton, QCheckBox {
+       spacing: 8px;
+       color: #a0a8b7;
+   }
 
-QRadioButton::indicator:hover {
-    border-color: #DDD;
-}
+   QRadioButton::indicator {
+       width: 14px;
+       height: 14px;
+       border-radius: 7px;
+       border: 1px solid #4a5568;
+       background-color: #111625;
+   }
+
+   QRadioButton::indicator:checked {
+       border: 2px solid #00f0ff;
+       background-color: #00f0ff; /* 选中变实心青色 */
+   }
+
+   QCheckBox::indicator {
+       width: 14px;
+       height: 14px;
+       border-radius: 2px;
+       border: 1px solid #4a5568;
+       background-color: #111625;
+   }
+
+   QCheckBox::indicator:checked {
+       border: 1px solid #00f0ff;
+       background-color: #00f0ff;
+   }
+
+
+
+/* =======================================================
+   BUTTONS (点击Start后彻底熄灭)
+   ======================================================= */
 
 QPushButton {
-        background-color: #333337;
-        border: none;
-        border-radius: 4px;
-        padding: 10px;
-        color: white;
-        font-weight: bold;
-        font-size: 13px;
-}
-
-QPushButton:hover {
-        background-color: #454548;
-}
-
-QPushButton:disabled {
-        background-color: #2D2D30;
-        color: #555;
-}
-
-QCheckBox {
-    color: #FFFFFF;
-    spacing: 5px;
-    font-size: 12px;
-}
-
-QCheckBox::indicator {
-    width: 14px;
-    height: 14px;
-    border: 2px solid #FFFFFF;
+    border: none;
     border-radius: 2px;
+    padding: 12px;
+    font-weight: bold;
+    font-size: 14px;
+    letter-spacing: 1px;
+}
+
+/* --- START 按钮 (正常状态：亮绿) --- */
+QPushButton#btnStartSend {
+    background-color: rgba(0, 230, 118, 0.1);
+    border: 1px solid #00e676;
+    color: #00e676;
+}
+
+QPushButton#btnStartSend:hover {
+    background-color: rgba(0, 230, 118, 0.2);
+    border: 1px solid #ffffff;
+    color: #ffffff;
+}
+
+/* --- [修改点] START 按钮 (禁用状态：完全熄灭) --- */
+/* 这里直接使用了和 STOP 按钮禁用态一样的颜色，彻底变灰 */
+QPushButton#btnStartSend:disabled {
+    background-color: transparent; /* 透明背景 */
+    border: 1px solid #2d3748;     /* 暗灰边框 */
+    color: #4a5568;                /* 暗灰文字 */
+}
+
+
+/* --- STOP 按钮 (正常状态：警报红) --- */
+QPushButton#btnStopSend {
+    background-color: rgba(255, 23, 68, 0.1);
+    border: 1px solid #ff1744;
+    color: #ff1744;
+}
+
+QPushButton#btnStopSend:hover {
+    background-color: #ff1744;
+    color: #ffffff;
+}
+
+/* --- STOP 按钮 (禁用状态：隐形/暗淡) --- */
+QPushButton#btnStopSend:disabled {
     background-color: transparent;
-}
-
-QCheckBox::indicator:hover {
-    border-color: #DDDDDD;
-}
-
-QCheckBox::indicator:checked {
-    background-color: #FFFFFF;
-    border-color: #FFFFFF;
-    image: none;
-}
-
-QCheckBox::indicator:indeterminate {
-    background-color: #888888;
-    border-color: #FFFFFF;
-}
-
-QPushButton#btnStartSend { background-color: #2E7D32; }
-QPushButton#btnStartSend:hover { background-color: #388E3C; }
-QPushButton#btnStartSend:disabled { background-color: #1B5E20; color: #666; }
-
-QPushButton#btnStopSend { background-color: #C62828; }
-QPushButton#btnStopSend:hover { background-color: #D32F2F; }
-QPushButton#btnStopSend:disabled { background-color: #581515; color: #666; }
-
-QPushButton#btnStartRx { background-color: #0069C0; }
-QPushButton#btnStartRx:hover { background-color: #2196F3; }
-QPushButton#btnStartRx:disabled { background-color: #0D47A1; color: #666; }
-
-QPushButton#btnStopRx { background-color: #C62828; }
-QPushButton#btnStopRx:hover { background-color: #D32F2F; }
-QPushButton#btnStopRx:disabled { background-color: #581515; color: #666; }
-
-QLabel#lblRxCount1 { color: #00E676; font-size: 36px; font-weight: bold; }
-QLabel#lblRxCount2 { color: #FFCA28; font-size: 36px; font-weight: bold; }
-QLabel#lblDelayVal { color: #29B6F6; font-size: 36px; font-weight: bold; }
-
-QFrame#frameStat1, QFrame#frameStat2, QFrame#frameStat3 {
-        background-color: #2D2D30;
-        border-radius: 8px;
+    border: 1px solid #2d3748;
+    color: #4a5568;
 }
    </string>
   </property>

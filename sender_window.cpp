@@ -8,7 +8,8 @@
 // === 1. 构造函数 (完整内容) ===
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
     ui(new Ui::MainWindow),
-    workerThread(nullptr), worker(nullptr)
+    workerThread(nullptr), worker(nullptr),
+    stopBtnAnim(nullptr), stopBtnEffect(nullptr) // <--- 初始化为空
 {
     ui->setupUi(this);
     loadInterfaces();
@@ -46,13 +47,21 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
 MainWindow::~MainWindow() {
     g_is_sending = false;
 
+    // 停止并清理线程
     if (workerThread) {
-        workerThread->terminate();
+        workerThread->quit(); // 推荐用 quit 而不是 terminate
         workerThread->wait();
     }
+
+    // 停止动画以防崩溃
+    if (stopBtnAnim) {
+        stopBtnAnim->stop();
+        delete stopBtnAnim;
+    }
+    // 不需要手动 delete stopBtnEffect，因为 ui 删除 btnStopSend 时会自动删除它持有的 effect
+
     delete ui;
 }
-
 
 // === 2. 新增：onPayloadModeChanged (完整内容) ===
 void MainWindow::onPayloadModeChanged() {
@@ -138,27 +147,33 @@ void MainWindow::loadInterfaces() {
 }
 // === 3. 修改：onStartSendClicked (完整内容) ===
 void MainWindow::onStartSendClicked() {
+    // 防止重复点击
     if (workerThread && workerThread->isRunning()) return;
 
+    // === 1. 切换按钮状态 ===
     ui->btnStartSend->setEnabled(false);
     ui->btnStopSend->setEnabled(true);
+
+    // === 2. 禁用所有配置区域 (防止发送过程中修改) ===
     ui->comboInterfaceTx->setEnabled(false);
     ui->grpParam->setEnabled(false);
-    ui->grpPayload->setEnabled(false); // 禁用载荷配置
+    ui->grpPayload->setEnabled(false);
+    ui->grpAddr->setEnabled(false); // <--- 【关键修改】禁用地址栏，防止焦点自动跳入并选中文本
 
+    // === 3. 准备工作线程 ===
     if (workerThread) { delete worker; delete workerThread; }
 
     workerThread = new QThread(this);
     worker = new PacketWorker();
 
-    // === 填充 SenderConfig 结构体 ===
+    // === 4. 填充 SenderConfig 结构体 ===
     memset(&worker->config, 0, sizeof(SenderConfig)); // 初始化清零
 
-    // 1. 基础参数
+    // [4.1] 基础参数 (接口名)
     std::string dev = ui->comboInterfaceTx->currentData().toString().toStdString();
     strncpy(worker->config.dev_name, dev.c_str(), sizeof(worker->config.dev_name) - 1);
 
-    // MAC 和 IP 解析 lambda
+    // [4.2] MAC 和 IP 解析 (Lambda辅助函数)
     auto parseMac = [](QString s, unsigned char* buf){
         static const QRegularExpression regex("[:-]");
         QStringList p = s.split(regex);
@@ -174,17 +189,18 @@ void MainWindow::onStartSendClicked() {
     parseIp(ui->editSrcIp->text(), worker->config.src_ip);
     parseIp(ui->editDstIp->text(), worker->config.des_ip);
 
-    // 2. 传输控制
+    // [4.3] 传输控制参数
     worker->config.send_interval_us = ui->spinInterval->value();
     worker->config.src_port = ui->spinSrcPort->value();
     worker->config.dst_port = ui->spinDstPort->value();
 
+    // [4.4] 协议类型判断
     if (ui->rbUdp->isChecked()) worker->config.packet_type = UDP_PACKAGE;
     else if (ui->rbTcp->isChecked()) worker->config.packet_type = TCP_PACKAGE;
     else if (ui->rbDns->isChecked()) worker->config.packet_type = DNS_PACKAGE;
     else worker->config.packet_type = ICMP_PACKAGE;
 
-    // TCP Flags
+    // [4.5] TCP Flags 处理
     if (ui->rbTcp->isChecked()) {
         int flags = 0;
         if (ui->chkFin->isChecked()) flags |= 0x01;
@@ -195,11 +211,11 @@ void MainWindow::onStartSendClicked() {
         worker->config.tcp_flags = flags;
     }
 
-    // DNS Domain
+    // [4.6] DNS Domain 处理
     std::string domain = ui->editDomain->text().toStdString();
     strncpy(worker->config.dns_domain, domain.c_str(), sizeof(worker->config.dns_domain) - 1);
 
-    // === 3. 载荷参数设置 ===
+    // [4.7] 载荷参数设置 (Payload Options)
     worker->config.payload_len = ui->spinPktLen->value();
 
     if (ui->rbPayFixed->isChecked()) {
@@ -208,7 +224,7 @@ void MainWindow::onStartSendClicked() {
     }
     else if (ui->rbPayCustom->isChecked()) {
         worker->config.payload_mode = PAYLOAD_CUSTOM;
-        // 关键：将 UI 字符串保存到 worker 的 QByteArray 中，保证生命周期
+        // 将 UI 字符串保存到 worker 的 QByteArray 中，保证线程生命周期安全
         worker->customDataBuffer = ui->editCustomData->text().toUtf8();
         // 指针赋值将在 doSendWork 中进行
     }
@@ -216,20 +232,73 @@ void MainWindow::onStartSendClicked() {
         worker->config.payload_mode = PAYLOAD_RANDOM;
     }
 
+    // === 5. 线程启动与连接 ===
     worker->moveToThread(workerThread);
     connect(workerThread, &QThread::started, worker, &PacketWorker::doSendWork);
     connect(worker, &PacketWorker::workFinished, workerThread, &QThread::quit);
+
+    // 线程结束后恢复界面状态
     connect(workerThread, &QThread::finished, this, [this]() {
         ui->btnStartSend->setEnabled(true);
         ui->btnStopSend->setEnabled(false);
+
+        // 恢复所有配置区域
         ui->comboInterfaceTx->setEnabled(true);
         ui->grpParam->setEnabled(true);
-        ui->grpPayload->setEnabled(true); // 恢复载荷配置
+        ui->grpPayload->setEnabled(true);
+        ui->grpAddr->setEnabled(true); // <--- 【关键修改】恢复地址栏
     });
+
     workerThread->start();
+
+    // === 6. 启动 STOP 按钮的呼吸光晕动画 ===
+    // 6.1 创建阴影特效 (高亮红)
+    if (!stopBtnEffect) {
+        stopBtnEffect = new QGraphicsDropShadowEffect(this);
+        stopBtnEffect->setOffset(0, 0);
+        stopBtnEffect->setColor(QColor(255, 0, 0, 255)); // 纯红不透明
+        stopBtnEffect->setBlurRadius(0);
+        ui->btnStopSend->setGraphicsEffect(stopBtnEffect);
+    }
+
+    // 6.2 创建动画 (控制光晕半径)
+    if (!stopBtnAnim) {
+        stopBtnAnim = new QPropertyAnimation(stopBtnEffect, "blurRadius", this);
+        stopBtnAnim->setDuration(1500);  // 呼吸速度
+        stopBtnAnim->setStartValue(20); // 最小光晕
+        stopBtnAnim->setEndValue(60);   // 最大光晕
+        stopBtnAnim->setEasingCurve(QEasingCurve::InOutSine);
+        stopBtnAnim->setLoopCount(-1);  // 无限循环
+    }
+
+    stopBtnAnim->start();
+
+    // === 7. 焦点管理 ===
+    // 强制将焦点转移给 STOP 按钮，避免其他控件获得焦点后显示高亮框或选中文本
+    ui->btnStopSend->setFocus();
 }
+
+// 建议新增一个私有函数 void stopBreathingAnim(); 或者直接写在 onStopSendClicked 里
 
 void MainWindow::onStopSendClicked() {
     g_is_sending = false;
     ui->btnStopSend->setEnabled(false);
+
+    // 1. 先处理动画 (Animation)
+    if (stopBtnAnim) {
+        stopBtnAnim->stop();
+        delete stopBtnAnim; // 动画对象由我们需要手动管理，或者指定 Parent 自动释放
+        stopBtnAnim = nullptr;
+    }
+
+    // 2. 再处理特效 (Effect)
+    if (stopBtnEffect) {
+        // 【关键修复】
+        // setGraphicsEffect(nullptr) 会自动销毁旧的 effect 对象。
+        // 所以千万不要在这里写 delete stopBtnEffect; 否则会崩溃。
+        ui->btnStopSend->setGraphicsEffect(nullptr);
+
+        // 仅仅将指针置空，防止悬空指针
+        stopBtnEffect = nullptr;
+    }
 }
