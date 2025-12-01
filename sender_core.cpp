@@ -461,113 +461,123 @@ static void build_dns(unsigned char* package, const char* domain, int dns_packag
     free(question.name);
 }
 
-/* 构造整包 */
+
+/* === 新增：载荷填充函数 === */
+static void fill_payload_data(unsigned char* data_ptr, int len, const SenderConfig* cfg) {
+    if (len <= 0) return;
+
+    switch (cfg->payload_mode) {
+    case PAYLOAD_FIXED:
+        // 模式2：使用用户指定的固定字节填充 (例如 memset 0x00 或 0xFF)
+        memset(data_ptr, cfg->fixed_byte_val, len);
+        break;
+
+    case PAYLOAD_CUSTOM:
+        // 模式3：用户自定义数据
+        if (cfg->custom_data) {
+            // 注意：这里假设 custom_data 长度足够，或者由调用者保证 payload_len 正确
+            // 实际工程中可以做更安全的检查，比如循环填充直到填满 len
+            int custom_len = strlen(cfg->custom_data);
+            if (custom_len >= len) {
+                memcpy(data_ptr, cfg->custom_data, len);
+            } else {
+                // 如果自定义数据比需要的长度短，就循环填充
+                int filled = 0;
+                while (filled < len) {
+                    int chunk = (len - filled > custom_len) ? custom_len : (len - filled);
+                    memcpy(data_ptr + filled, cfg->custom_data, chunk);
+                    filled += chunk;
+                }
+            }
+        } else {
+            memset(data_ptr, 0, len);
+        }
+        break;
+
+    case PAYLOAD_RANDOM:
+    default:
+        // 模式1：随机填充 (保留原有逻辑)
+        for (int i = 0; i < len; ++i) {
+            data_ptr[i] = (unsigned char)(rand() % 256);
+        }
+        break;
+    }
+}
+
+// === 修改后的 build_package (完整内容) ===
 static void build_package(
     unsigned char* package,
     int* package_len,
-    unsigned short type,
     int seq_num,
-    const unsigned char src_mac[6],
-    const unsigned char des_mac[6],
-    const unsigned char src_ip[4],
-    const unsigned char des_ip[4],
-    // === 新增参数 ===
-    unsigned short src_port_in,
-    unsigned short dst_port_in,
-    unsigned short payload_len_in,
-    unsigned char tcp_flags_in,
-    const char* domain_in
+    const SenderConfig* cfg // 参数改为结构体
     )
 {
-    int udp_len;
-    int icmp_len;
-    int ip_len;
+    int udp_len, icmp_len, ip_len;
+    // 端口处理：0则使用默认
+    unsigned short s_port = (cfg->src_port == 0) ? 10086 : cfg->src_port;
+    unsigned short d_port = (cfg->dst_port == 0) ? 10086 : cfg->dst_port;
 
-    // 使用传入的端口，如果为0则使用默认
-    unsigned short s_port = (src_port_in == 0) ? 10086 : src_port_in;
-    unsigned short d_port = (dst_port_in == 0) ? 10086 : dst_port_in;
-
-    switch (type)
+    switch (cfg->packet_type)
     {
     case UDP_PACKAGE:
-        // UDP 长度 = 头部(8字节) + 负载长度
-        // 如果用户没传 payload_len，默认给 86-8=78 字节负载
-        udp_len = 8 + (payload_len_in == 0 ? 78 : payload_len_in);
-
+        // UDP 长度 = 头部(8) + 负载
+        udp_len = 8 + cfg->payload_len;
         ip_len = 20 + udp_len;
-
         *package_len = 14 + ip_len;
-        build_ethernet_header(package, des_mac, src_mac, 0x0800);
-        build_ip_header(package, src_ip, des_ip, (unsigned short)ip_len, 0x11);
+
+        build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
+        build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x11);
+
+        // --- 核心修改：填充 UDP 载荷 ---
+        // 偏移：以太网(14) + IP(20) + UDP头(8)
+        fill_payload_data(package + 14 + 20 + 8, cfg->payload_len, cfg);
+
+        // 计算 UDP 校验和 (此时载荷已填充)
         build_udp_header(package, s_port, d_port, (unsigned short)udp_len);
         break;
 
     case ICMP_PACKAGE:
-        // ICMP 忽略端口和长度设置，使用标准长度
+        // ICMP 保持原样，也可以支持 payload 但通常是固定的
         icmp_len = 8 + 5;
         ip_len = 20 + icmp_len;
         *package_len = 14 + ip_len;
-        build_ethernet_header(package, des_mac, src_mac, 0x0800);
-        build_ip_header(package, src_ip, des_ip, (unsigned short)ip_len, 0x01);
+
+        build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
+        build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x01);
         build_icmp_header(package, seq_num);
         break;
 
     case DNS_PACKAGE:
-        // DNS 逻辑保持不变 (暂不使用自定义端口)
-        {
-            // 使用传入的域名，如果为空则给默认值防止崩溃
-            const char* target_domain = (domain_in && *domain_in) ? domain_in : "baidu.com";
+    {
+        const char* target_domain = (cfg->dns_domain && *cfg->dns_domain) ? cfg->dns_domain : "baidu.com";
+        int domain_length = (int)strlen(target_domain);
+        int dns_package_len = 12 + domain_length + 2 + 4;
+        *package_len = 14 + 20 + 8 + dns_package_len;
+        unsigned short ip_total_len = (unsigned short)(*package_len - 14);
 
-            int domain_length = (int)strlen(target_domain);
-            int dns_package_len = 12 + domain_length + 2 + 4;
+        build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
+        build_ip_header(package, cfg->src_ip, cfg->des_ip, ip_total_len, 0x11);
+        build_dns(package, target_domain, dns_package_len);
+    }
+    break;
 
-            *package_len = 14 + 20 + 8 + dns_package_len;
-            unsigned short ip_total_len = (unsigned short)(*package_len - 14);
-
-            build_ethernet_header(package, des_mac, src_mac, 0x0800);
-            build_ip_header(package, src_ip, des_ip, ip_total_len, 0x11);
-
-            // 注意：这里 build_dns 函数需要修改吗？
-            // 不需要修改 build_dns 的签名，只需要传参即可。
-            build_dns(package, target_domain, dns_package_len);
-        }
-        break;
     case TCP_PACKAGE:
     {
-        // TCP 头固定 20 字节，加上用户指定的 payload_len
-        // 如果用户没填长度，默认发 0 长度载荷
-        int tcp_data_len = (payload_len_in == 0) ? 0 : payload_len_in;
+        int tcp_data_len = cfg->payload_len;
         int tcp_total_len = 20 + tcp_data_len;
         ip_len = 20 + tcp_total_len;
-
         *package_len = 14 + ip_len;
 
-        // 1. 构造以太网头
-        build_ethernet_header(package, des_mac, src_mac, 0x0800);
+        build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
+        build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x06);
 
-        // 2. 构造 IP 头 (Protocol = 0x06 代表 TCP)
-        build_ip_header(package, src_ip, des_ip, (unsigned short)ip_len, 0x06);
+        // --- 核心修改：填充 TCP 载荷 ---
+        // 偏移：以太网(14) + IP(20) + TCP头(20)
+        fill_payload_data(package + 14 + 20 + 20, tcp_data_len, cfg);
 
-        // 3. 填充 TCP 载荷数据 (可选：填入一些 dummy data)
-        if (tcp_data_len > 0) {
-            char* data_ptr = (char*)(package + 14 + 20 + 20);
-            memset(data_ptr, 'A', tcp_data_len); // 填充 'A'
-        }
-
-        // 4. 构造 TCP 头
-        // 这里需要策略：
-        // seq_num: 我们使用传入的 seq_num (发包循环的 i) 作为序列号
-        // flags: 默认设为 SYN (0x02) 用于测试连接，或者 PSH|ACK (0x18)
-
-        build_tcp_header(package,
-                         s_port,
-                         d_port,
-                         seq_num, // Sequence Number
-                         0,
-                         tcp_flags_in,
-                         64240,   // Window Size
-                         (u_short)tcp_data_len,
-                         src_ip, des_ip);
+        build_tcp_header(package, s_port, d_port, seq_num, 0,
+                         cfg->tcp_flags, 64240, (u_short)tcp_data_len,
+                         cfg->src_ip, cfg->des_ip);
     }
     break;
 
@@ -589,27 +599,14 @@ timeval add_stamp(timeval* ptv, unsigned int dus)
     }
     return *ptv;
 }
-void send_queue(
-    pcap_t* fp,
-    unsigned int npacks,
-    unsigned int dus,
-    unsigned short packet_type,
-    const unsigned char src_mac[6],
-    const unsigned char des_mac[6],
-    const unsigned char src_ip[4],
-    const unsigned char des_ip[4],
-    // === 新增参数 ===
-    unsigned short src_port,
-    unsigned short dst_port,
-    unsigned short payload_len,
-    unsigned char tcp_flags,
-    const char* domain_url
-    )
+
+// === 修改后的 send_queue (完整内容) ===
+// 注意：保留了 seq_counter 的引用传递
+void send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, unsigned int &seq_counter)
 {
     unsigned int i;
-
     pcap_send_queue* squeue;
-    const int MaxPacketLen = 10000000;
+    const int MaxPacketLen = 10000;
 
     struct pcap_pkthdr mpktheader;
     struct pcap_pkthdr* pktheader = &mpktheader;
@@ -618,9 +615,7 @@ void send_queue(
     tv.tv_sec = 0;
     tv.tv_usec = 0;
 
-    squeue = pcap_sendqueue_alloc(
-        (unsigned int)((MaxPacketLen + sizeof(struct pcap_pkthdr)) * npacks)
-        );
+    squeue = pcap_sendqueue_alloc((unsigned int)((MaxPacketLen + sizeof(struct pcap_pkthdr)) * npacks));
     if (!squeue) {
         printf("pcap_sendqueue_alloc failed\n");
         return;
@@ -631,27 +626,15 @@ void send_queue(
 
     for (i = 0; i < npacks; i++)
     {
-
+        // 调用 build_package，传入结构体指针
         build_package(
             package,
             &package_len,
-            packet_type,
-            (int)(i + 1),
-            src_mac,
-            des_mac,
-            src_ip,
-            des_ip,
-            // === 传递新增参数 ===
-            src_port,
-            dst_port,
-            payload_len,
-            tcp_flags,
-            domain_url
+            (int)seq_counter++, // 序列号自增
+            cfg
             );
 
-        if (package_len <= 0) {
-            continue;
-        }
+        if (package_len <= 0) continue;
 
         pktheader->ts = tv;
         pktheader->caplen = (bpf_u_int32)package_len;
@@ -665,26 +648,16 @@ void send_queue(
             return;
         }
 
-        add_stamp(&tv, dus);
+        add_stamp(&tv, cfg->send_interval_us); // 使用 cfg 中的间隔
         pktheader->ts = tv;
     }
 
     delete[] package;
 
     int send_num = pcap_sendqueue_transmit(fp, squeue, 1);
-    if ((unsigned int)send_num < squeue->len)
-    {
-        printf("transmit error %s, only %d bytes sent of %u\n",
-               pcap_geterr(fp), send_num, squeue->len);
-    }
-    else {
-        printf("transmit ok, bytes=%d queued=%u\n", send_num, squeue->len);
-    }
-
+    // (日志输出可保留或注释)
     pcap_sendqueue_destroy(squeue);
 }
-
-
 
 
 /* 网卡选择函数 */
@@ -769,102 +742,64 @@ char* get_interface_name(int interface_idx)
 
 
 /* 发包模式入口 对外接口 */
-extern "C" void start_send_mode(
-    const char* dev_name,
-    const unsigned char src_mac[6],
-    const unsigned char des_mac[6],
-    const unsigned char src_ip[4],
-    const unsigned char des_ip[4],
-    unsigned int send_interval_us,
-    unsigned short packet_type,
-    // === 新增参数 ===
-    unsigned short src_port,
-    unsigned short dst_port,
-    unsigned short payload_len,
-    unsigned char tcp_flags,
-    const char* domain_url
-    )
+// === 修改后的 start_send_mode (完整内容) ===
+extern "C" void start_send_mode(const SenderConfig* config)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
 
-    if (!dev_name || !*dev_name) {
-        printf("start_send_mode: invalid dev_name\n");
+    if (!config || !config->dev_name[0]) {
+        printf("start_send_mode: invalid config\n");
         return;
     }
 
-    pcap_t* handler = pcap_open(dev_name,
+    pcap_t* handler = pcap_open(config->dev_name,
                                 65535,
                                 PCAP_OPENFLAG_PROMISCUOUS,
                                 3000,
                                 NULL,
                                 errbuf);
     if (!handler) {
-        printf("err in pcap_open (%s): %s\n", dev_name, errbuf);
+        printf("err in pcap_open (%s): %s\n", config->dev_name, errbuf);
         return;
     }
-    cout << "choose " << dev_name << " for send..." << endl;
+    std::cout << "Starting send on " << config->dev_name << "..." << std::endl;
 
-    // === 修复开始 ===
-    // 目标：每批次发包占用约 1s 的时间，这样 UI 点击 Stop 后，最多延迟 0.2秒 就会停止
+    // === 创建本地配置副本 ===
+    // 目的：防止多线程下外部修改了 config 指向的内容导致崩溃或数据不一致
+    SenderConfig cfg = *config;
+
+    // 计算批次
     unsigned int target_batch_time_us = 1000000; // 1s
-
-    // 计算每批次应该发多少个包
-    // 如果间隔是 0，避免除以零错误，强制设为 1
-    unsigned int safe_interval = (send_interval_us == 0) ? 1 : send_interval_us;
+    unsigned int safe_interval = (cfg.send_interval_us == 0) ? 1 : cfg.send_interval_us;
     unsigned int npacks = target_batch_time_us / safe_interval;
 
-    // 限制边界：至少发1个包，最多发1000个包
     if (npacks < 1) npacks = 1;
     if (npacks > 1000) npacks = 1000;
 
-    // === 修复核心：计算理论耗时 ===
-    // 这批包理论上应该消耗的总微秒数
-    long long expected_duration_us = (long long)npacks * send_interval_us;
+    long long expected_duration_us = (long long)npacks * cfg.send_interval_us;
+    unsigned int current_seq_num = 1;
 
     while (g_is_sending) {
-        // 1. 记录开始时间
         auto start_time = std::chrono::steady_clock::now();
 
-        // 2. 发送数据 (如果是 npacks=1，这里会瞬间返回)
-        send_queue(handler,
-                   npacks,
-                   send_interval_us,
-                   packet_type,
-                   src_mac,
-                   des_mac,
-                   src_ip,
-                   des_ip,
-                   src_port,
-                   dst_port,
-                   payload_len,
-                   tcp_flags,
-                   domain_url);
+        // 调用 send_queue，传入结构体指针
+        send_queue(handler, npacks, &cfg, current_seq_num);
 
-        // 3. 记录结束时间
         auto end_time = std::chrono::steady_clock::now();
-
-        // 4. 计算实际花费了多少微秒
         long long elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
 
-        // 5. 如果发得太快（比理论时间短），就通过 Sleep 补足剩余时间
         if (elapsed_us < expected_duration_us) {
-            // 需要补足的时间
             long long sleep_us = expected_duration_us - elapsed_us;
-
-            // 只有当需要休眠的时间比较长时才 sleep，避免极短时间的 sleep 精度问题
             if (sleep_us > 100) {
                 std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
             }
         }
-
-        // (可选) 防止 CPU 100% 占用，如果间隔极小，加个极短的 yield
         if (expected_duration_us == 0) std::this_thread::yield();
     }
 
     pcap_close(handler);
-    printf("Sending stopped gracefully.\n");
+    printf("Sending stopped.\n");
 }
-
 
 
 #pragma pack()
