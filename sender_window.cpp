@@ -69,7 +69,7 @@ void MainWindow::onProtoToggled() {
     // --- 载荷长度 ---
     ui->lblLen->setVisible(needPayloadLen);
     ui->spinPktLen->setVisible(needPayloadLen);
-    ui->spinPktLen->setEnabled(needPayloadLen);
+    ui->spinPktLen->setEnabled(needPayloadLen); // <---【关键修复】添加这一行
 
     // --- 发包间隔 (始终显示且可用) ---
     ui->lblIntVal->setVisible(true);

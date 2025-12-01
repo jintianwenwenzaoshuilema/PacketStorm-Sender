@@ -609,7 +609,7 @@ void send_queue(
     unsigned int i;
 
     pcap_send_queue* squeue;
-    const int MaxPacketLen = 1000;
+    const int MaxPacketLen = 10000000;
 
     struct pcap_pkthdr mpktheader;
     struct pcap_pkthdr* pktheader = &mpktheader;
