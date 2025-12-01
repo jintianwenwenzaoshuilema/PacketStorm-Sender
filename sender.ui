@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>460</width>
-    <height>780</height>
+    <height>896</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -16,29 +16,27 @@
   <property name="styleSheet">
    <string notr="true">
    /* =======================================================
-      GLOBAL SETTINGS (全局设置)
-      强制所有控件使用 JetBrains Mono，营造终端感
+      GLOBAL (全局设置)
       ======================================================= */
    * {
        font-family: "JetBrains Mono", "Consolas", monospace;
        font-size: 13px;
-       color: #a0a8b7; /* 默认文字颜色：灰白，避免刺眼 */
+       color: #a0a8b7;
    }
 
    QMainWindow, QWidget {
-       background-color: #0b0f19; /* 极深蓝黑色背景 */
+       background-color: #0b0f19;
    }
 
    /* =======================================================
-      GROUP BOX (分组框 - 模块化设计)
-      科技感的细边框，青色标题
+      GROUP BOX (分组框)
       ======================================================= */
    QGroupBox {
-       border: 1px solid #1c2333; /* 暗淡的边框 */
+       border: 1px solid #1c2333;
        border-radius: 4px;
-       margin-top: 24px; /* 为标题留出空间 */
+       margin-top: 24px;
        padding-top: 10px;
-       background-color: #0f121a; /* 比背景稍亮，形成层级 */
+       background-color: #0f121a;
    }
 
    QGroupBox::title {
@@ -46,148 +44,171 @@
        subcontrol-position: top left;
        left: 10px;
        padding: 0 6px;
-       color: #00f0ff; /* 赛博朋克核心色：青色 */
+       color: #00f0ff;
        font-weight: bold;
-       background-color: #0b0f19; /* 遮挡住边框线 */
+       background-color: #0b0f19;
    }
 
    /* =======================================================
       LABELS (标签)
-      稍微调暗，让数据更突出
       ======================================================= */
    QLabel {
        color: #718096;
        font-weight: normal;
+       background: transparent;
+   }
+
+   /* 加粗的标签 (如 Flags, Domain) 高亮显示 */
+   QLabel[font-weight="bold"], QLabel#lblFlags, QLabel#lblDomain {
+       color: #cbd5e0;
+       font-weight: bold;
    }
 
    /* =======================================================
-      INPUT FIELDS (输入框 - 核心数据区)
-      黑底、亮字、底部发光线条
+      INPUT FIELDS (输入框 - Domain 现在会听这里的指挥了)
       ======================================================= */
    QLineEdit, QSpinBox, QComboBox {
        background-color: #111625;
        border: 1px solid #2d3748;
-       border-bottom: 2px solid #2d3748; /* 默认底部暗色 */
+       border-bottom: 2px solid #2d3748;
        border-radius: 2px;
-       color: #00f0ff; /* 输入的数据显示为高亮青色 */
+       color: #00f0ff;
        padding: 6px;
        selection-background-color: #00f0ff;
        selection-color: #000000;
    }
 
-   /* 鼠标悬停 */
-   QLineEdit:hover, QSpinBox:hover, QComboBox:hover {
-       background-color: #151a2b;
-       border-color: #4a5568;
-   }
-
-   /* 获得焦点（输入时）：底部线条变亮，产生通电感 */
    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
        background-color: #151a2b;
-       border: 1px solid #00f0ff; /* 全边框发光 */
-       border-bottom: 2px solid #00f0ff;
-       color: #ffffff; /* 输入时文字变白，更清晰 */
-   }
-
-   /* 下拉框弹出的列表样式 */
-   QComboBox QAbstractItemView {
-       background-color: #111625;
-       color: #00f0ff;
-       border: 1px solid #2d3748;
-       selection-background-color: #2d3748;
-       selection-color: #00f0ff;
-   }
-
-   /* =======================================================
-      RADIO  CHECKBOX (单选/复选框)
-      自定义绘制，去除系统默认的土气样式
-      ======================================================= */
-   QRadioButton, QCheckBox {
-       spacing: 8px;
-       color: #a0a8b7;
-   }
-
-   QRadioButton::indicator {
-       width: 14px;
-       height: 14px;
-       border-radius: 7px;
-       border: 1px solid #4a5568;
-       background-color: #111625;
-   }
-
-   QRadioButton::indicator:checked {
-       border: 2px solid #00f0ff;
-       background-color: #00f0ff; /* 选中变实心青色 */
-   }
-
-   QCheckBox::indicator {
-       width: 14px;
-       height: 14px;
-       border-radius: 2px;
-       border: 1px solid #4a5568;
-       background-color: #111625;
-   }
-
-   QCheckBox::indicator:checked {
        border: 1px solid #00f0ff;
-       background-color: #00f0ff;
+       border-bottom: 2px solid #00f0ff;
+       color: #ffffff;
    }
 
+/* =======================================================
+   RADIO BUTTON (圆形单选框)
+   修改策略：
+   1. 未选中时：使用 #666666 (亮灰) 边框，确保圆形轮廓清晰可见。
+   2. 选中时：边框变为 #00f0ff (青色)，且内部填满。
+   ======================================================= */
+QRadioButton {
+    spacing: 8px;
+    color: #a0a8b7;
+}
+
+/* --- 未选中状态 (清晰的空心圆环) --- */
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+
+    /* 强制圆形：14的一半是7 */
+    border-radius: 7px;
+
+    /* 【修改点】边框改为2px实线，颜色由原来的暗灰改为 #666666，
+       这样在深黑背景下就能清楚看到一个圆圈，而不是模糊的一团 */
+    border: 2px solid #666666;
+
+    background-color: transparent; /* 背景透明，突出边框 */
+}
+
+/* --- 选中状态 (实心发光圆球) --- */
+QRadioButton::indicator:checked {
+    width: 14px;
+    height: 14px;
+    border-radius: 7px; /* 保持圆形 */
+
+    /* 【修改点】选中后边框变色 */
+    border: 2px solid #00f0ff;
+
+    background-color: #00f0ff; /* 内部填满 */
+}
+
+/* 鼠标悬停 */
+QRadioButton::indicator:hover {
+    border-color: #00f0ff; /* 悬停时边框变亮 */
+}
 
 
 /* =======================================================
-   BUTTONS (点击Start后彻底熄灭)
+   CHECKBOX (方形复选框)
+   修改策略：保持微圆角的方形，边框设为 1px 以示区别
    ======================================================= */
+QCheckBox {
+    spacing: 8px;
+    color: #a0a8b7;
+}
 
-QPushButton {
-    border: none;
+/* --- 未选中 (空心方框) --- */
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+
+    /* 方形微圆角 */
     border-radius: 2px;
-    padding: 12px;
-    font-weight: bold;
-    font-size: 14px;
-    letter-spacing: 1px;
-}
 
-/* --- START 按钮 (正常状态：亮绿) --- */
-QPushButton#btnStartSend {
-    background-color: rgba(0, 230, 118, 0.1);
-    border: 1px solid #00e676;
-    color: #00e676;
-}
+    /* 边框比单选框细一点 (1px)，形成视觉差异 */
+    border: 1px solid #666666;
 
-QPushButton#btnStartSend:hover {
-    background-color: rgba(0, 230, 118, 0.2);
-    border: 1px solid #ffffff;
-    color: #ffffff;
-}
-
-/* --- [修改点] START 按钮 (禁用状态：完全熄灭) --- */
-/* 这里直接使用了和 STOP 按钮禁用态一样的颜色，彻底变灰 */
-QPushButton#btnStartSend:disabled {
-    background-color: transparent; /* 透明背景 */
-    border: 1px solid #2d3748;     /* 暗灰边框 */
-    color: #4a5568;                /* 暗灰文字 */
-}
-
-
-/* --- STOP 按钮 (正常状态：警报红) --- */
-QPushButton#btnStopSend {
-    background-color: rgba(255, 23, 68, 0.1);
-    border: 1px solid #ff1744;
-    color: #ff1744;
-}
-
-QPushButton#btnStopSend:hover {
-    background-color: #ff1744;
-    color: #ffffff;
-}
-
-/* --- STOP 按钮 (禁用状态：隐形/暗淡) --- */
-QPushButton#btnStopSend:disabled {
     background-color: transparent;
-    border: 1px solid #2d3748;
-    color: #4a5568;
 }
+
+/* --- 选中 (实心方块) --- */
+QCheckBox::indicator:checked {
+    border-radius: 2px;
+    border: 1px solid #00f0ff;
+    background-color: #00f0ff;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #00f0ff;
+}
+
+   /* =======================================================
+      BUTTONS (按钮)
+      ======================================================= */
+   QPushButton {
+       border: none;
+       border-radius: 2px;
+       padding: 12px;
+       font-weight: bold;
+       font-size: 14px;
+       letter-spacing: 1px;
+   }
+
+   /* --- START 按钮 --- */
+   QPushButton#btnStartSend {
+       background-color: rgba(0, 230, 118, 0.1);
+       border: 1px solid #00e676;
+       color: #00e676;
+   }
+   QPushButton#btnStartSend:hover {
+       background-color: rgba(0, 230, 118, 0.3);
+       border: 1px solid #ffffff;
+       color: #ffffff;
+   }
+   /* Start 禁用态 (点击后变暗灰) */
+   QPushButton#btnStartSend:disabled {
+       background-color: transparent;
+       border: 1px solid #2d3748;
+       color: #4a5568;
+   }
+
+   /* --- STOP 按钮 --- */
+   QPushButton#btnStopSend {
+       background-color: rgba(255, 23, 68, 0.1);
+       border: 1px solid #ff1744;
+       color: #ff1744;
+   }
+   QPushButton#btnStopSend:hover {
+       background-color: #ff1744;
+       color: #ffffff;
+   }
+   /* Stop 禁用态 */
+   QPushButton#btnStopSend:disabled {
+       background-color: transparent;
+       border: 1px solid #2d3748;
+       color: #4a5568;
+   }
    </string>
   </property>
   <widget class="QWidget" name="centralwidget">
@@ -360,10 +381,10 @@ QPushButton#btnStopSend:disabled {
           <item>
            <widget class="QFrame" name="containerTcpFlags">
             <property name="frameShape">
-             <enum>QFrame::NoFrame</enum>
+             <enum>QFrame::Shape::NoFrame</enum>
             </property>
             <property name="frameShadow">
-             <enum>QFrame::Plain</enum>
+             <enum>QFrame::Shadow::Plain</enum>
             </property>
             <layout class="QHBoxLayout" name="hlTcpFlags">
              <property name="spacing">
@@ -457,10 +478,10 @@ QPushButton#btnStopSend:disabled {
           <item>
            <widget class="QFrame" name="containerDns">
             <property name="frameShape">
-             <enum>QFrame::NoFrame</enum>
+             <enum>QFrame::Shape::NoFrame</enum>
             </property>
             <property name="frameShadow">
-             <enum>QFrame::Plain</enum>
+             <enum>QFrame::Shadow::Plain</enum>
             </property>
             <layout class="QHBoxLayout" name="hlDns">
              <property name="leftMargin">
@@ -488,7 +509,7 @@ QPushButton#btnStopSend:disabled {
              <item>
               <widget class="QLineEdit" name="editDomain">
                <property name="styleSheet">
-                <string>background-color: #2D2D30; color: #F0F0F0; border: 1px solid #3E3E42; padding: 4px;</string>
+                <string notr="true"/>
                </property>
                <property name="text">
                 <string>www.google.com</string>
@@ -569,24 +590,24 @@ QPushButton#btnStopSend:disabled {
                </item>
                <item>
                 <widget class="QSpinBox" name="spinFixVal">
-                 <property name="displayIntegerBase">
-                  <number>16</number>
-                 </property>
                  <property name="prefix">
                   <string>0x</string>
                  </property>
                  <property name="maximum">
                   <number>255</number>
                  </property>
+                 <property name="displayIntegerBase">
+                  <number>16</number>
+                 </property>
                 </widget>
                </item>
                <item>
                 <widget class="QLineEdit" name="editCustomData">
-                 <property name="placeholderText">
-                  <string>Enter text payload...</string>
-                 </property>
                  <property name="visible">
                   <bool>false</bool>
+                 </property>
+                 <property name="placeholderText">
+                  <string>Enter text payload...</string>
                  </property>
                 </widget>
                </item>
@@ -666,7 +687,7 @@ QPushButton#btnStopSend:disabled {
               </property>
              </widget>
             </item>
-            </layout>
+           </layout>
           </item>
          </layout>
         </widget>

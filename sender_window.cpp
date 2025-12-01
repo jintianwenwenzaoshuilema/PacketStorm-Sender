@@ -12,6 +12,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
     stopBtnAnim(nullptr), stopBtnEffect(nullptr) // <--- 初始化为空
 {
     ui->setupUi(this);
+    ui->editDomain->setStyleSheet("");
     loadInterfaces();
 
     // 基础按钮连接
