@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>460</width>
+    <width>600</width>
     <height>896</height>
    </rect>
   </property>
@@ -84,6 +84,13 @@
        border-bottom: 2px solid #00f0ff;
        color: #ffffff;
    }
+
+/* 禁用状态下的输入框：变暗并改变文字颜色，明确告知不可编辑 */
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {
+    background-color: #0b0f19; /* 融入背景 */
+    color: #4a5568;            /* 暗灰色文字 */
+    border: 1px dashed #2d3748;
+}
 
 /* =======================================================
    RADIO BUTTON (圆形单选框)
@@ -232,13 +239,13 @@ QCheckBox::indicator:hover {
      <widget class="QGroupBox" name="grpSender">
       <property name="minimumSize">
        <size>
-        <width>420</width>
+        <width>0</width>
         <height>0</height>
        </size>
       </property>
       <property name="maximumSize">
        <size>
-        <width>420</width>
+        <width>16777215</width>
         <height>16777215</height>
        </size>
       </property>

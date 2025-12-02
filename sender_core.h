@@ -7,6 +7,11 @@
 // 全局停止标志
 extern std::atomic<bool> g_is_sending;
 
+extern std::atomic<uint64_t> g_total_sent;   // 总发包数
+extern std::atomic<uint64_t> g_total_bytes;  // 总发送字节数
+
+typedef void (*StatsCallback)(uint64_t total_sent, uint64_t total_bytes);
+
 extern "C" {
 #endif
 
@@ -50,6 +55,7 @@ struct SenderConfig {
 
     // --- 应用层 ---
     char dns_domain[256];
+    StatsCallback stats_callback;
 };
 
 // === 3. 启动发送 (参数简化为结构体指针) ===
