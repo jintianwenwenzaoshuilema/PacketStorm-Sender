@@ -305,9 +305,8 @@ timeval add_stamp(timeval* ptv, unsigned int dus) {
 
 
 /* ==========================================================================
-   发包核心函数 (Send Queue - Sync Mode Enabled)
+   发包核心函数 (Send Queue - Modified for Burst)
    ========================================================================== */
-// 【修改】返回值改为 uint64_t，用于返回本批次实际发送的字节数
 uint64_t send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, unsigned int &seq_counter, pcap_send_queue* squeue, unsigned char* shared_buffer) {
     unsigned int i;
     struct pcap_pkthdr pktheader;
@@ -317,8 +316,11 @@ uint64_t send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, un
     squeue->len = 0;
     int package_len = 0;
 
-    // 【新增】定义本批次字节统计变量
+    // 本批次字节统计变量
     uint64_t batch_bytes = 0;
+
+    // 判断是否为 Burst 模式 (间隔为0)
+    bool is_burst = (cfg->send_interval_us == 0);
 
     for (i = 0; i < npacks; i++) {
         build_package(shared_buffer, &package_len, (int)seq_counter++, cfg);
@@ -333,24 +335,30 @@ uint64_t send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, un
             break;
         }
 
-        // 【新增】累加准确的包长度
+        // 累加准确的包长度
         batch_bytes += package_len;
 
-        // 增加时间戳间隔，配合 Sync Mode 使用
-        add_stamp(&tv, cfg->send_interval_us);
+        // 【修改】只有非 Burst 模式才需要计算时间戳间隔
+        // Burst 模式下所有包时间戳由驱动自动处理或忽略，减少CPU计算
+        if (!is_burst) {
+            add_stamp(&tv, cfg->send_interval_us);
+        }
     }
 
     if (squeue->len > 0) {
-        // 【关键】 Sync = 1 (TRUE)
-        pcap_sendqueue_transmit(fp, squeue, 1);
+        // 【核心修改】
+        // sync_flag = 1: 同步发送（按时间戳间隔发，适合定速）
+        // sync_flag = 0: 非同步发送（全速发，适合 Burst）
+        int sync_flag = is_burst ? 0 : 1;
+
+        pcap_sendqueue_transmit(fp, squeue, sync_flag);
     }
 
-    // 【新增】返回统计结果
     return batch_bytes;
 }
 
 /* ==========================================================================
-   对外接口 (DLL Export - With Batch Pacing Fix)
+   对外接口 (DLL Export - Modified for Burst)
    ========================================================================== */
 extern "C" void start_send_mode(const SenderConfig* config) {
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -369,31 +377,43 @@ extern "C" void start_send_mode(const SenderConfig* config) {
         std::cerr << "[ERROR] pcap_open failed: " << errbuf << std::endl;
         return;
     }
-    std::cout << "[INFO] Adapter opened. Mode: Sync Batching with Pacing." << std::endl;
 
     SenderConfig cfg = *config;
+    bool is_burst_mode = (cfg.send_interval_us == 0);
+
+    if (is_burst_mode) {
+        std::cout << "[INFO] Adapter opened. Mode: BURST (Full Speed)." << std::endl;
+    } else {
+        std::cout << "[INFO] Adapter opened. Mode: Sync Batching (Interval: " << cfg.send_interval_us << "us)." << std::endl;
+    }
 
     // --- 1. 计算批次参数 ---
-    // 目标：一次准备 1秒 的数据量 (1,000,000 微秒)
-    // 这样驱动程序可以接管这1秒内的定时发送
-    unsigned int target_batch_time_us = 1000000;
+    unsigned int npacks;
 
-    unsigned int safe_interval = (cfg.send_interval_us == 0) ? 1 : cfg.send_interval_us;
-    unsigned int npacks = target_batch_time_us / safe_interval;
+    if (is_burst_mode) {
+        // 【修改】Burst 模式：设置较大的固定批次
+        // 这决定了单次系统调用发送多少个包。
+        // 2048 是一个经验值，既能保证吞吐量，又不会让 pcap_sendqueue_alloc 占用过多内存
+        npacks = 2048;
+    } else {
+        // 定时模式：计算 1秒 内的包量作为缓冲基准
+        unsigned int target_batch_time_us = 1000000;
+        unsigned int safe_interval = (cfg.send_interval_us == 0) ? 1 : cfg.send_interval_us;
+        npacks = target_batch_time_us / safe_interval;
+        if (npacks < 1) npacks = 1;
+        if (npacks > 5000) npacks = 5000; // 限制最大值
+    }
 
-    // 边界检查
-    if (npacks < 1) npacks = 1;
-    // 限制最大队列长度，防止内存过大 (例如5000个包)
-    if (npacks > 5000) npacks = 5000;
-    if (cfg.send_interval_us == 0) npacks = 10000;
-
-    // 计算这一批包理论上总共需要消耗多少时间
+    // 计算这一批包理论上总共需要消耗多少时间 (仅用于定速模式)
     long long batch_duration_us = (long long)npacks * cfg.send_interval_us;
 
     // --- 2. 内存池预分配 ---
-    std::vector<unsigned char> shared_buffer(10000, 0); // 包体缓存
-    unsigned int queue_mem_size = (10000 + sizeof(struct pcap_pkthdr)) * npacks;
-    pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size); // 队列缓存
+    // 预留足够大的 buffer (假设最大包长 10000 字节，实际通常是 1514)
+    std::vector<unsigned char> shared_buffer(10000, 0);
+
+    // 分配队列内存
+    unsigned int queue_mem_size = (2000 + sizeof(struct pcap_pkthdr)) * npacks; // 2000 字节足够容纳 MTU
+    pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
 
     if (!squeue) {
         std::cerr << "[ERROR] pcap_sendqueue_alloc failed!" << std::endl;
@@ -409,54 +429,46 @@ extern "C" void start_send_mode(const SenderConfig* config) {
     std::cout << "[INFO] Sending loop started." << std::endl;
 
     while (g_is_sending) {
-        // 计算这一轮批次 "理应" 结束的时间点
-        next_batch_time += std::chrono::microseconds(batch_duration_us);
+        // 计算下一轮时间点 (仅定速模式需要)
+        if (!is_burst_mode) {
+            next_batch_time += std::chrono::microseconds(batch_duration_us);
+        }
 
         // 调用发送
-        // 注意：send_queue 内部应使用 pcap_sendqueue_transmit(..., 1) 开启同步模式
-        // 这会阻塞直到驱动认为发送完毕
         uint64_t bytes_sent_this_batch = send_queue(handler, npacks, &cfg, current_seq_num, squeue, shared_buffer.data());
 
         // === 更新全局统计 ===
-        g_total_sent += npacks; // 包数量
-
-        // 【修改】使用准确的字节数，不再使用 estimated_len 估算
+        g_total_sent += npacks;
         g_total_bytes += bytes_sent_this_batch;
 
-        // ============================================================
-        // [新增] 调用回调函数通知 UI (如果设置了回调)
-        // ============================================================
+        // 回调通知
         if (cfg.stats_callback) {
             cfg.stats_callback(g_total_sent, g_total_bytes);
         }
 
-        // --- 4. 批次间补时 (核心修复) ---
-        auto now = std::chrono::steady_clock::now();
-
-        if (cfg.send_interval_us != 0) {
+        // --- 4. 批次间补时 (Burst 模式自动跳过) ---
+        // cfg.send_interval_us 为 0 时，此 if 不成立，循环全速运行
+        if (!is_burst_mode) {
+            auto now = std::chrono::steady_clock::now();
             if (now < next_batch_time) {
                 auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(next_batch_time - now).count();
-
-                // 如果剩余时间 > 1ms，使用 sleep 释放 CPU
                 if (remaining > 1000) {
                     std::this_thread::sleep_for(std::chrono::microseconds(remaining));
                 }
-                // 微小误差使用 yield
                 else if (remaining > 0) {
                     std::this_thread::yield();
                 }
             }
             else {
-                // 防滞后：如果系统卡顿导致现在已经严重超时 (Late)，
-                // 不要试图追赶进度 (会造成瞬间爆发)，而是重置基准时间。
+                // 防滞后重置
                 next_batch_time = std::chrono::steady_clock::now();
             }
         }
     }
+
     // --- 5. 清理资源 ---
     pcap_sendqueue_destroy(squeue);
     pcap_close(handler);
     std::cout << "\n[INFO] Sending stopped." << std::endl;
 }
-
 #pragma pack()
