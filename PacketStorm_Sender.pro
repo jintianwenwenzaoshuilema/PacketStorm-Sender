@@ -1,4 +1,4 @@
-QT += core gui
+QT       += core gui network charts
 
 
 
@@ -29,7 +29,7 @@ CONFIG += c++20
 
 
 INCLUDEPATH += "C:\WpdPack\Include"
-LIBS += "-LC:\WpdPack\Lib\x64" -lwpcap -lws2_32
+LIBS += "-LC:\WpdPack\Lib\x64" -lwpcap -lws2_32 -liphlpapi
 
 DEFINES += WIN32
 DEFINES += WPCAP

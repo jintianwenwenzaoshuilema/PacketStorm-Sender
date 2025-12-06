@@ -11,56 +11,60 @@
 #include <QLabel>
 #include <QStatusBar>
 #include <QLocale>
+#include <QNetworkInterface>
+#include <QHostAddress>
+#include <QPushButton>
+#include <QSettings>
+#include <QDateTime>
+
+// =========================================================
+// [修复] 显式引入具体的 Charts 头文件
+// =========================================================
+#include <QtCharts/QChartView>
+#include <QtCharts/QSplineSeries>
+#include <QtCharts/QValueAxis>
+#include <QtCharts/QChart>
+
 
 namespace Ui {
 class MainWindow;
 }
 
 // ============================================================================
-// [修改] 状态看板结构体：去除竖线，恢复默认靠右
+// StatusDashboard 结构体
 // ============================================================================
 struct StatusDashboard {
     QLabel *lblCount;
     QLabel *lblBytes;
     QLabel *lblRate;
 
-    // --- 初始化函数 ---
     void init(QStatusBar* bar, QWidget* parent) {
-        // 1. 设置状态栏整体样式
-        // [关键修改] 添加 QStatusBar::item { border: none; } 以去除系统自带的分割线
         bar->setStyleSheet(
             "QStatusBar { background: #0f121a; color: #718096; border-top: 1px solid #1c2333; }"
             "QStatusBar::item { border: none; }"
             );
 
-        // 2. 创建标签
         lblCount = new QLabel("Sent: 0", parent);
         lblBytes = new QLabel("Data: 0 B", parent);
         lblRate  = new QLabel("Speed: 0 pps | 0 B/s", parent);
 
-        // 3. 固定宽度 (保持之前的设定，防止跳动)
         lblCount->setFixedWidth(150);
         lblBytes->setFixedWidth(150);
-        lblRate->setFixedWidth(270);
+        lblRate->setFixedWidth(400);
 
-        // 4. 设置对齐方式
         lblCount->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         lblBytes->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         lblRate->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
-        // 5. 设置颜色样式
-        // [关键修改] 去掉了 lblRate 的 border-left (竖线)
         lblCount->setStyleSheet("color: #00e676; font-weight: bold; padding-right: 5px;");
         lblBytes->setStyleSheet("color: #00f0ff; font-weight: bold; padding-right: 5px;");
-        lblRate->setStyleSheet("color: #FFB74D; font-weight: bold; padding-left: 10px;"); // <--- 删除了 border-left
+        lblRate->setStyleSheet("color: #FFB74D; font-weight: bold; padding-left: 10px;");
 
-        // 6. 添加到状态栏 (使用 addPermanentWidget 让它们靠右排列)
         bar->addPermanentWidget(lblCount);
         bar->addPermanentWidget(lblBytes);
         bar->addPermanentWidget(lblRate);
     }
 
-    // --- 更新函数 (保持不变) ---
     void updateUI(uint64_t sent, uint64_t bytes, double pps, double bps) {
         QLocale loc(QLocale::English);
         lblCount->setText("Sent: " + loc.toString((qulonglong)sent));
@@ -97,9 +101,7 @@ public:
     SenderConfig config;
     QByteArray customDataBuffer;
 
-    // 静态回调函数
     static void StatsCallbackProxy(uint64_t sent, uint64_t bytes) {
-        // [修复原理] 这里需要 m_instance 有值才能发出信号
         if (m_instance) {
             emit m_instance->statsUpdated(sent, bytes);
         }
@@ -107,11 +109,7 @@ public:
 
 public slots:
     void doSendWork() {
-        // ============================================================
-        // 【关键修复】必须在这里赋值，否则静态回调函数找不到实例！
-        // ============================================================
         m_instance = this;
-
         if (config.payload_mode == PAYLOAD_CUSTOM) {
             config.custom_data = customDataBuffer.constData();
             config.custom_data_len = customDataBuffer.length();
@@ -120,11 +118,9 @@ public slots:
             config.custom_data_len = 0;
         }
         config.stats_callback = &PacketWorker::StatsCallbackProxy;
-
         g_is_sending = true;
         start_send_mode(&config);
-
-        m_instance = nullptr; // 结束后清理
+        m_instance = nullptr;
         emit workFinished();
     }
 signals:
@@ -136,7 +132,7 @@ private:
 };
 
 // ============================================================================
-// MainWindow 类 (保持不变)
+// MainWindow 类
 // ============================================================================
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -151,25 +147,51 @@ private slots:
     void onProtoToggled();
     void onPayloadModeChanged();
     void updateStats(uint64_t currSent, uint64_t currBytes);
+    void onInterfaceSelectionChanged(int index);
+    void onGetDstMacClicked();
 
 private:
     void loadInterfaces();
+    void loadHistory();
+    void saveHistory(const QString &ip);
+    void loadConfig();
+    void saveConfig();
+    void appendLog(const QString &msg, int level = 0);
+
+    void setupChart();
 
     Ui::MainWindow *ui;
     QThread *workerThread;
     PacketWorker *worker;
     QPropertyAnimation *stopBtnAnim;
     QGraphicsDropShadowEffect *stopBtnEffect;
-
-    // === 统计相关 ===
     QTimer *statsTimer;
     QElapsedTimer rateTimer;
     uint64_t lastTotalSent = 0;
     uint64_t lastTotalBytes = 0;
-
-    // 使用结构体统一管理底部状态栏
     StatusDashboard m_dashboard;
-
-    // 中间的 PPS 目标显示
     QLabel *lblTargetPPS;
+    QPushButton *btnGetMac;
+
+
+    QList<double> m_rawByteHistory;
+    // [修改] 拆分为两个图表的变量
+    QChartView *viewPPS; // PPS 视图
+    QChartView *viewBW;  // Bandwidth 视图
+
+    QChart *chartPPS;
+    QChart *chartBW;
+
+    QSplineSeries *seriesPPS;
+    QSplineSeries *seriesMbps;
+
+    QValueAxis *axisX_PPS; // PPS 的时间轴
+    QValueAxis *axisX_BW;  // BW 的时间轴
+
+    QValueAxis *axisY_PPS; // PPS 的数值轴
+    QValueAxis *axisY_BW;  // BW 的数值轴 (原 axisY_Mbps)
+
+    qint64 m_chartTimeX;
+    double m_maxPPS;
+    double m_maxMbps;
 };
