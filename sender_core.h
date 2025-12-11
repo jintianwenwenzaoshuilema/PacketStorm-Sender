@@ -6,9 +6,13 @@
 #ifdef __cplusplus
 // 全局停止标志
 extern std::atomic<bool> g_is_sending;
-
 extern std::atomic<uint64_t> g_total_sent;   // 总发包数
 extern std::atomic<uint64_t> g_total_bytes;  // 总发送字节数
+
+// === [新增] OS Socket 专用变量 (独立控制) ===
+extern std::atomic<bool> g_is_sock_sending;
+extern std::atomic<uint64_t> g_sock_total_sent;
+extern std::atomic<uint64_t> g_sock_total_bytes;
 
 typedef void (*StatsCallback)(uint64_t total_sent, uint64_t total_bytes);
 
@@ -58,8 +62,31 @@ struct SenderConfig {
     StatsCallback stats_callback;
 };
 
+
+typedef void (*LogCallback)(const char* msg, int level);
+
+// [新增] 简化的 Socket 配置结构体
+struct SocketConfig {
+    char target_ip[32];
+    unsigned short target_port;
+
+    // [新增] 指定源 IP (用于绑定特定网卡)
+    char source_ip[32];
+
+    bool is_udp;
+    int payload_len;
+    unsigned int interval_us;
+    StatsCallback stats_callback;
+    // [新增] 日志回调指针
+    LogCallback log_callback;
+
+};
+
 // === 3. 启动发送 (参数简化为结构体指针) ===
 __declspec(dllexport) void start_send_mode(const SenderConfig* config);
+
+// [新增] 启动标准 Socket 发送
+__declspec(dllexport) void start_socket_send_mode(const SocketConfig* config);
 
 #ifdef __cplusplus
 } // extern "C"

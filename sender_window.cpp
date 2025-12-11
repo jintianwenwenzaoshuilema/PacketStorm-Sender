@@ -22,7 +22,9 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
+// 初始化静态成员
 PacketWorker* PacketWorker::m_instance = nullptr;
+SocketWorker* SocketWorker::m_instance = nullptr; // [新增] 初始化 SocketWorker
 
 // ============================================================================
 // SpinBox 增强版
@@ -121,7 +123,8 @@ static bool GetAdapterInfoWinAPI(const QString& pcapName, QString& outMac, QStri
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
     ui(new Ui::MainWindow),
     workerThread(nullptr), worker(nullptr),
-    stopBtnAnim(nullptr), stopBtnEffect(nullptr)
+    stopBtnAnim(nullptr), stopBtnEffect(nullptr),
+    sockThread(nullptr), sockWorker(nullptr) // [新增] 初始化右侧模块指针
 {
     ui->setupUi(this);
 
@@ -151,6 +154,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
     if (ui->editDstIp->lineEdit()) {
         ui->editDstIp->lineEdit()->setValidator(ipVal);
     }
+
+    // [新增] 为右侧 Socket 模块的 IP 输入框添加验证器
+    ui->editSockIp->setValidator(new QRegularExpressionValidator(ipRegex, this));
 
     QRegularExpression macRegex("^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$");
     QRegularExpressionValidator *macVal = new QRegularExpressionValidator(macRegex, this);
@@ -195,6 +201,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
     connect(ui->rbPayCustom, &QRadioButton::toggled, this, &MainWindow::onPayloadModeChanged);
     connect(ui->btnGetMac, &QPushButton::clicked, this, &MainWindow::onGetDstMacClicked);
 
+    // [新增] 连接右侧 Socket 发送模块的信号
+    connect(ui->btnSockStart, &QPushButton::clicked, this, &MainWindow::onSockStartClicked);
+    connect(ui->btnSockStop, &QPushButton::clicked, this, &MainWindow::onSockStopClicked);
+
     connect(ui->editCustomData, &QLineEdit::textChanged, this, [this](const QString &text){
         if(ui->rbPayCustom->isChecked()) {
             ui->spinPktLen->setValue(text.toUtf8().length());
@@ -215,18 +225,138 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent),
     appendLog("System Ready. Configuration restored.", 1);
 }
 
+
 MainWindow::~MainWindow() {
     saveConfig();
+
+    // 停止左侧 WinPcap 线程
     g_is_sending = false;
     if (workerThread) {
         workerThread->quit();
         workerThread->wait();
     }
+
+    // [新增] 停止右侧 Socket 线程
+    g_is_sock_sending = false;
+    if (sockThread) {
+        sockThread->quit();
+        sockThread->wait();
+    }
+
     if (stopBtnAnim) {
         stopBtnAnim->stop();
         delete stopBtnAnim;
     }
     delete ui;
+}
+
+// ============================================================================
+// [新增] 右侧 Socket 模块实现 (OS Stack Sender)
+// ============================================================================
+void MainWindow::onSockStartClicked() {
+    // 1. 安全检查：如果指针不为空且线程正在运行，则通过
+    if (sockThread && sockThread->isRunning()) return;
+
+    // UI 锁定逻辑...
+    ui->btnSockStart->setEnabled(false);
+    ui->btnSockStop->setEnabled(true);
+
+    // 锁定控件...
+    ui->grpSocketSender->findChild<QWidget*>("grpSockProto")->setEnabled(false);
+    ui->editSockIp->setEnabled(false);
+    ui->spinSockPort->setEnabled(false);
+    ui->spinSockLen->setEnabled(false);
+    ui->spinSockInt->setEnabled(false);
+    if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
+        ui->comboSockSrc->setEnabled(false);
+    }
+
+    // 重置数据...
+    g_sock_total_sent = 0;
+    g_sock_total_bytes = 0;
+    rateTimer.start();
+    lastTotalSent = 0;
+    lastTotalBytes = 0;
+
+    // 创建新线程对象
+    sockThread = new QThread(this);
+    sockWorker = new SocketWorker();
+
+    // 配置赋值...
+    std::string ip = ui->editSockIp->text().toStdString();
+    memset(sockWorker->config.target_ip, 0, sizeof(sockWorker->config.target_ip));
+    strncpy(sockWorker->config.target_ip, ip.c_str(), sizeof(sockWorker->config.target_ip)-1);
+
+    memset(sockWorker->config.source_ip, 0, sizeof(sockWorker->config.source_ip));
+    if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
+        QString selectedPcapName = ui->comboSockSrc->currentData().toString();
+        if (selectedPcapName.isEmpty()) {
+            strcpy(sockWorker->config.source_ip, "0.0.0.0");
+            appendLog("[SOCK] Routing: Auto (Default)", 0);
+        } else {
+            QString mac, srcIp;
+            if (GetAdapterInfoWinAPI(selectedPcapName, mac, srcIp) && !srcIp.isEmpty() && srcIp != "0.0.0.0") {
+                strncpy(sockWorker->config.source_ip, srcIp.toStdString().c_str(), sizeof(sockWorker->config.source_ip)-1);
+                appendLog("[SOCK] Bound Interface: " + srcIp, 0);
+            } else {
+                strcpy(sockWorker->config.source_ip, "0.0.0.0");
+                appendLog("[SOCK] Warning: Selected interface has no IPv4. Fallback to Auto.", 2);
+            }
+        }
+    }
+
+    sockWorker->config.target_port = ui->spinSockPort->value();
+    sockWorker->config.is_udp = ui->rbSockUdp->isChecked();
+    sockWorker->config.payload_len = ui->spinSockLen->value();
+    sockWorker->config.interval_us = ui->spinSockInt->value();
+
+    sockWorker->moveToThread(sockThread);
+
+    // 连接信号
+    connect(sockThread, &QThread::started, sockWorker, &SocketWorker::doWork);
+    connect(sockWorker, &SocketWorker::workFinished, sockThread, &QThread::quit);
+    connect(sockWorker, &SocketWorker::workFinished, sockWorker, &SocketWorker::deleteLater);
+    connect(sockThread, &QThread::finished, sockThread, &QThread::deleteLater);
+    connect(sockWorker, &SocketWorker::statsUpdated, this, &MainWindow::updateSockStats, Qt::QueuedConnection);
+    connect(sockWorker, &SocketWorker::logUpdated, this, [this](QString msg, int level){
+        this->appendLog(msg, level);
+    }, Qt::QueuedConnection);
+
+    // === [关键修复] 线程结束后的清理逻辑 ===
+    connect(sockThread, &QThread::finished, this, [this](){
+        ui->btnSockStart->setEnabled(true);
+        ui->btnSockStop->setEnabled(false);
+        ui->grpSocketSender->findChild<QWidget*>("grpSockProto")->setEnabled(true);
+        ui->editSockIp->setEnabled(true);
+        ui->spinSockPort->setEnabled(true);
+        ui->spinSockLen->setEnabled(true);
+        ui->spinSockInt->setEnabled(true);
+
+        if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
+            ui->comboSockSrc->setEnabled(true);
+        }
+
+        appendLog("[SOCK] Standard Sender stopped.", 0);
+
+        // [这里是修复的核心] 将指针置空，防止下次点击时访问野指针
+        sockThread = nullptr;
+        sockWorker = nullptr;
+    });
+
+    sockThread->start();
+    appendLog(QString("[SOCK] Started... Int: %1us").arg(sockWorker->config.interval_us), 1);
+}
+
+void MainWindow::onSockStopClicked() {
+    // 设置停止标志，线程循环检测到后会退出
+    g_is_sock_sending = false;
+    ui->btnSockStop->setEnabled(false);
+}
+
+void MainWindow::updateSockStats(uint64_t sent, uint64_t bytes) {
+    // 这里简单复用 updateStats 的逻辑
+    // 注意：如果左侧 WinPcap 和右侧 Socket 同时发送，图表会跳变
+    updateStats(sent, bytes);
 }
 
 // ============================================================================
@@ -345,6 +475,14 @@ void MainWindow::appendLog(const QString &msg, int level) {
 
 void MainWindow::loadInterfaces() {
     ui->comboInterfaceTx->clear();
+
+    // [新增] 清空并初始化右侧 Socket 源列表
+    // 注意：请确保你在 ui_sender.h 或 UI 文件中已经添加了 comboSockSrc
+    if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
+        ui->comboSockSrc->clear();
+        ui->comboSockSrc->addItem("Auto (Let OS Decide)", ""); // 默认选项，对应 IP 为空
+    }
+
     pcap_if_t *alldevs;
     char errbuf[PCAP_ERRBUF_SIZE];
     if (pcap_findalldevs(&alldevs, errbuf) == -1) {
@@ -352,12 +490,22 @@ void MainWindow::loadInterfaces() {
         appendLog(QString("Pcap Error: %1").arg(errbuf), 2);
         return;
     }
+
     for(pcap_if_t *d=alldevs; d; d=d->next) {
         QString pcapName = QString(d->name);
         QString desc = d->description ? QString(d->description) : pcapName;
+
+        // 填充左侧 (WinPcap)
         ui->comboInterfaceTx->addItem(desc, pcapName);
+
+        // [新增] 填充右侧 (Socket)
+        // 我们存入 pcapName，在点击开始时再解析出 IP
+        if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
+            ui->comboSockSrc->addItem(desc, pcapName);
+        }
     }
     pcap_freealldevs(alldevs);
+
     connect(ui->comboInterfaceTx, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onInterfaceSelectionChanged);
     if (ui->comboInterfaceTx->count() > 0) {
         onInterfaceSelectionChanged(0);
@@ -385,6 +533,7 @@ void MainWindow::onInterfaceSelectionChanged(int index) {
     }
 }
 
+
 void MainWindow::onGetDstMacClicked() {
 #ifdef _WIN32
     QString dstIpStr = ui->editDstIp->currentText();
@@ -402,12 +551,15 @@ void MainWindow::onGetDstMacClicked() {
     ui->btnGetMac->setEnabled(false);
     ui->btnGetMac->setText("...");
     appendLog("Resolving MAC for " + dstIpStr + "...", 0);
+
     std::thread([this, DestIp, dstIpStr]() {
         ULONG MacAddr[2]; ULONG PhysAddrLen = 6; IPAddr SrcIp = 0;
         DWORD dwRet = SendARP(DestIp, SrcIp, &MacAddr, &PhysAddrLen);
+
         QMetaObject::invokeMethod(this, [this, dwRet, MacAddr, PhysAddrLen, dstIpStr]() {
             ui->btnGetMac->setEnabled(true);
             ui->btnGetMac->setText("GET");
+
             if (dwRet == NO_ERROR) {
                 BYTE *bPhysAddr = (BYTE *) &MacAddr;
                 QString macStr;
@@ -419,6 +571,11 @@ void MainWindow::onGetDstMacClicked() {
                 }
                 ui->editDstMac->setText(macStr);
                 appendLog("MAC Resolved: " + macStr, 1);
+
+                // 【新增】获取成功后，自动聚焦到 MAC 输入框，并全选方便复制或修改
+                ui->editDstMac->setFocus();
+                ui->editDstMac->selectAll();
+
             } else {
                 QString errApi;
                 if (dwRet == ERROR_GEN_FAILURE) errApi = "Generic Failure";
@@ -708,8 +865,13 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
     }
 }
 
+// ============================================================================
+// 加载配置 (启动时恢复界面状态)
+// ============================================================================
 void MainWindow::loadConfig() {
     QSettings settings("PacketStorm", "SenderConfig");
+
+    // --- [原有] 左侧 WinPcap 模块配置加载 ---
     QString lastInterface = settings.value("config/interface_name").toString();
     int idx = ui->comboInterfaceTx->findData(lastInterface);
     if (idx != -1) {
@@ -749,10 +911,49 @@ void MainWindow::loadConfig() {
     ui->spinSrcPort->setValue(settings.value("config/src_port", 10086).toInt());
     ui->spinDstPort->setValue(settings.value("config/dst_port", 10086).toInt());
     ui->editDomain->setText(settings.value("config/domain", "www.google.com").toString());
+
+    // ========================================================================
+    // [新增] 右侧 OS Stack Sender 配置加载
+    // ========================================================================
+
+    // 1. Source Interface (下拉框)
+    // 此时 loadInterfaces() 已经执行完毕，下拉框已有数据
+    QString sockIface = settings.value("sock_config/source_iface", "").toString();
+    if (!sockIface.isEmpty()) {
+        int sockIdx = ui->comboSockSrc->findData(sockIface);
+        if (sockIdx != -1) {
+            ui->comboSockSrc->setCurrentIndex(sockIdx);
+        }
+    }
+
+    // 2. Target IP
+    QString savedSockIp = settings.value("sock_config/target_ip", "192.168.1.1").toString();
+    if (!savedSockIp.isEmpty()) {
+        ui->editSockIp->setText(savedSockIp);
+    }
+
+    // 3. Target Port
+    ui->spinSockPort->setValue(settings.value("sock_config/target_port", 8080).toInt());
+
+    // 4. Protocol (UDP/TCP)
+    bool isSockUdp = settings.value("sock_config/is_udp", true).toBool();
+    if (isSockUdp) ui->rbSockUdp->setChecked(true);
+    else ui->rbSockTcp->setChecked(true);
+
+    // 5. Payload Size
+    ui->spinSockLen->setValue(settings.value("sock_config/payload_len", 60000).toInt());
+
+    // 6. Interval
+    ui->spinSockInt->setValue(settings.value("sock_config/interval", 1000).toInt());
 }
 
+// ============================================================================
+// 保存配置 (关闭窗口或点击开始发送时调用)
+// ============================================================================
 void MainWindow::saveConfig() {
     QSettings settings("PacketStorm", "SenderConfig");
+
+    // --- [原有] 左侧 WinPcap 模块配置保存 ---
     settings.setValue("config/interface_name", ui->comboInterfaceTx->currentData().toString());
     settings.setValue("config/interface_index", ui->comboInterfaceTx->currentIndex());
     settings.setValue("config/src_mac", ui->editSrcMac->text());
@@ -780,6 +981,28 @@ void MainWindow::saveConfig() {
     settings.setValue("config/src_port", ui->spinSrcPort->value());
     settings.setValue("config/dst_port", ui->spinDstPort->value());
     settings.setValue("config/domain", ui->editDomain->text());
+
+    // ========================================================================
+    // [新增] 右侧 OS Stack Sender 配置保存
+    // ========================================================================
+
+    // 1. Source Interface (保存 Pcap Device Name，即 itemData)
+    settings.setValue("sock_config/source_iface", ui->comboSockSrc->currentData().toString());
+
+    // 2. Target IP
+    settings.setValue("sock_config/target_ip", ui->editSockIp->text());
+
+    // 3. Target Port
+    settings.setValue("sock_config/target_port", ui->spinSockPort->value());
+
+    // 4. Protocol
+    settings.setValue("sock_config/is_udp", ui->rbSockUdp->isChecked());
+
+    // 5. Payload Size
+    settings.setValue("sock_config/payload_len", ui->spinSockLen->value());
+
+    // 6. Interval
+    settings.setValue("sock_config/interval", ui->spinSockInt->value());
 }
 
 // ============================================================================

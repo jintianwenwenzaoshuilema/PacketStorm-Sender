@@ -7,6 +7,7 @@
 #include <pcap.h>
 #include <chrono>
 #include <vector>
+#include <ws2tcpip.h>
 
 #ifndef WIN32
 #include <sys/socket.h>
@@ -16,31 +17,50 @@
 #include <winsock.h>
 #endif
 
-
-
 using namespace std;
 
-// === 1. Global Control Flags and Statistics Definitions ===
-// These definitions allocate memory for the variables declared as extern in sender_core.h
+// === Global Control Flags ===
 std::atomic<bool> g_is_sending{false};
-std::atomic<uint64_t> g_total_sent{0};   // [FIX] Definition added
-std::atomic<uint64_t> g_total_bytes{0};  // [FIX] Definition added
+std::atomic<uint64_t> g_total_sent{0};
+std::atomic<uint64_t> g_total_bytes{0};
+
+// === Socket Specific Variables ===
+std::atomic<bool> g_is_sock_sending{false};
+std::atomic<uint64_t> g_sock_total_sent{0};
+std::atomic<uint64_t> g_sock_total_bytes{0};
 
 #pragma pack(1)
 
 /* ==========================================================================
-   Protocol Header Definitions (Kept as is)
+   Helper: Payload Filling
    ========================================================================== */
-#define IPTOSBUFFERS    12
-static char* iptos(u_long in) {
-    static char output[IPTOSBUFFERS][3 * 4 + 3 + 1];
-    static short which;
-    u_char* p = (u_char*)&in;
-    which = (short)((which + 1 == IPTOSBUFFERS) ? 0 : which + 1);
-    sprintf(output[which], "%d.%d.%d.%d", p[0], p[1], p[2], p[3]);
-    return output[which];
+static void fill_payload_data(unsigned char* data_ptr, int target_len, const SenderConfig* cfg) {
+    if (target_len <= 0) return;
+    switch (cfg->payload_mode) {
+    case PAYLOAD_FIXED:
+        memset(data_ptr, cfg->fixed_byte_val, target_len);
+        break;
+    case PAYLOAD_CUSTOM:
+        if (cfg->custom_data && cfg->custom_data_len > 0) {
+            int filled = 0;
+            while (filled < target_len) {
+                int rem = target_len - filled;
+                int copy = (rem > cfg->custom_data_len) ? cfg->custom_data_len : rem;
+                memcpy(data_ptr + filled, cfg->custom_data, copy);
+                filled += copy;
+            }
+        } else { memset(data_ptr, 0, target_len); }
+        break;
+    case PAYLOAD_RANDOM:
+    default:
+        for (int i = 0; i < target_len; ++i) data_ptr[i] = (unsigned char)(rand() % 256);
+        break;
+    }
 }
 
+/* ==========================================================================
+   Protocol Headers
+   ========================================================================== */
 struct ip_v4_address { u_char byte1, byte2, byte3, byte4; };
 struct mac_address { u_char byte1, byte2, byte3, byte4, byte5, byte6; };
 
@@ -81,9 +101,8 @@ struct dns_queries {
 };
 
 /* ==========================================================================
-   Helper Functions (Checksum, Header Building - Kept as is)
+   Checksum & Builders
    ========================================================================== */
-
 static u_short checksum(u_short* buffer, int size) {
     unsigned long cksum = 0;
     while (size > 1) { cksum += *buffer++; size -= sizeof(u_short); }
@@ -159,18 +178,18 @@ static void build_tcp_header(unsigned char* package, u_short s_port, u_short d_p
     free(tmp);
 }
 
-static void build_icmp_header(unsigned char* package, int seq_num) {
+static void build_icmp_header(unsigned char* package, int seq_num, int payload_len, const SenderConfig* cfg) {
     icmp_echo* icmph = (icmp_echo*)(package + 14 + 20);
-    memset(icmph, 0, 13);
+    int icmp_total_len = 8 + payload_len;
+    memset(icmph, 0, icmp_total_len);
     icmph->type = 8; icmph->code = 0; icmph->checksum = 0;
     icmph->ident = htons(0x1234); icmph->seq = htons((uint16_t)seq_num);
-    // Payload for ICMP (5 bytes as in original code)
-    unsigned char* data = (unsigned char*)(package + 14 + 20 + 8);
-    data[0]=0x12; data[1]=0x34; data[2]=0x56; data[3]=0x78; data[4]=0x90;
-    icmph->checksum = htons(calculate_checksum((unsigned char*)icmph, 13));
+
+    unsigned char* data_ptr = (unsigned char*)(package + 14 + 20 + 8);
+    fill_payload_data(data_ptr, payload_len, cfg);
+    icmph->checksum = htons(calculate_checksum((unsigned char*)icmph, icmp_total_len));
 }
 
-// DNS 相关简化保留，实际工程中建议将DNS构建逻辑也优化为不使用malloc
 static int dns_create_header(struct dns_header* header) {
     if (!header) return -1;
     memset(header, 0, sizeof(struct dns_header));
@@ -185,7 +204,6 @@ static int dns_create_queries(struct dns_queries* question, const char* hostname
     if (!question->name) return -2;
     question->length = (int)len + 2;
     question->qtype = htons(1); question->qclass = htons(1);
-
     char* qname = question->name;
     char* host_dup = strdup(hostname);
     char* token = strtok(host_dup, ".");
@@ -195,8 +213,7 @@ static int dns_create_queries(struct dns_queries* question, const char* hostname
         memcpy(qname, token, tlen); qname += tlen;
         token = strtok(NULL, ".");
     }
-    *qname = 0;
-    free(host_dup);
+    *qname = 0; free(host_dup);
     return 0;
 }
 static void build_dns(unsigned char* package, const char* domain, int dns_package_len) {
@@ -207,7 +224,6 @@ static void build_dns(unsigned char* package, const char* domain, int dns_packag
 
     struct dns_header header; dns_create_header(&header);
     struct dns_queries question; dns_create_queries(&question, domain);
-
     char* req = (char*)(package + 14 + 20 + 8);
     memcpy(req, &header, sizeof(header));
     memcpy(req + sizeof(header), question.name, question.length);
@@ -228,36 +244,7 @@ static void build_dns(unsigned char* package, const char* domain, int dns_packag
     free(question.name);
 }
 
-/* ==========================================================================
-   功能核心：载荷填充、打包、发送逻辑
-   ========================================================================== */
-
-// 填充载荷数据
-static void fill_payload_data(unsigned char* data_ptr, int target_len, const SenderConfig* cfg) {
-    if (target_len <= 0) return;
-    switch (cfg->payload_mode) {
-    case PAYLOAD_FIXED:
-        memset(data_ptr, cfg->fixed_byte_val, target_len);
-        break;
-    case PAYLOAD_CUSTOM:
-        if (cfg->custom_data && cfg->custom_data_len > 0) {
-            int filled = 0;
-            while (filled < target_len) {
-                int rem = target_len - filled;
-                int copy = (rem > cfg->custom_data_len) ? cfg->custom_data_len : rem;
-                memcpy(data_ptr + filled, cfg->custom_data, copy);
-                filled += copy;
-            }
-        } else { memset(data_ptr, 0, target_len); }
-        break;
-    case PAYLOAD_RANDOM:
-    default:
-        for (int i = 0; i < target_len; ++i) data_ptr[i] = (unsigned char)(rand() % 256);
-        break;
-    }
-}
-
-// 构建完整数据包 (写入 shared_buffer)
+// === Build Package (Single) ===
 static void build_package(unsigned char* package, int* package_len, int seq_num, const SenderConfig* cfg) {
     int udp_len, icmp_len, ip_len;
     unsigned short s_port = (cfg->src_port == 0) ? 10086 : cfg->src_port;
@@ -265,18 +252,24 @@ static void build_package(unsigned char* package, int* package_len, int seq_num,
 
     switch (cfg->packet_type) {
     case UDP_PACKAGE:
-        udp_len = 8 + cfg->payload_len; ip_len = 20 + udp_len; *package_len = 14 + ip_len;
+        udp_len = 8 + cfg->payload_len;
+        ip_len = 20 + udp_len;
+        *package_len = 14 + ip_len;
         build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
         build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x11);
         fill_payload_data(package + 14 + 20 + 8, cfg->payload_len, cfg);
         build_udp_header(package, s_port, d_port, (unsigned short)udp_len);
         break;
-    case ICMP_PACKAGE:
-        icmp_len = 13; ip_len = 20 + icmp_len; *package_len = 14 + ip_len;
+    case ICMP_PACKAGE: {
+        int safe_payload_len = cfg->payload_len;
+        if (safe_payload_len < 32) safe_payload_len = 32;
+        icmp_len = 8 + safe_payload_len;
+        ip_len = 20 + icmp_len;
+        *package_len = 14 + ip_len;
         build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
         build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x01);
-        build_icmp_header(package, seq_num);
-        break;
+        build_icmp_header(package, seq_num, safe_payload_len, cfg);
+    } break;
     case DNS_PACKAGE: {
         const char* domain = (cfg->dns_domain && *cfg->dns_domain) ? cfg->dns_domain : "baidu.com";
         int dlen = (int)strlen(domain);
@@ -288,189 +281,351 @@ static void build_package(unsigned char* package, int* package_len, int seq_num,
     } break;
     case TCP_PACKAGE: {
         int tcp_data_len = cfg->payload_len;
-        int tcp_total_len = 20 + tcp_data_len; ip_len = 20 + tcp_total_len; *package_len = 14 + ip_len;
+        int tcp_total_len = 20 + tcp_data_len;
+        ip_len = 20 + tcp_total_len;
+        *package_len = 14 + ip_len;
         build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
         build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x06);
         fill_payload_data(package + 14 + 20 + 20, tcp_data_len, cfg);
         build_tcp_header(package, s_port, d_port, seq_num, 0, cfg->tcp_flags, 64240, (u_short)tcp_data_len, cfg->src_ip, cfg->des_ip);
     } break;
-    default: *package_len = 0; break;
+    default:
+        *package_len = 0;
+        break;
     }
 }
 
-// 时间戳计算
-timeval add_stamp(timeval* ptv, unsigned int dus) {
+static timeval add_stamp(timeval* ptv, unsigned int dus) {
     ptv->tv_usec += dus;
     if (ptv->tv_usec >= 1000000) { ptv->tv_sec++; ptv->tv_usec -= 1000000; }
     return *ptv;
 }
 
-
 /* ==========================================================================
-   发包核心函数 (Send Queue - Modified for Burst)
+   Logic Separation: Burst vs Normal
    ========================================================================== */
-uint64_t send_queue(pcap_t* fp, unsigned int npacks, const SenderConfig* cfg, unsigned int &seq_counter, pcap_send_queue* squeue, unsigned char* shared_buffer) {
-    unsigned int i;
-    struct pcap_pkthdr pktheader;
-    timeval tv; tv.tv_sec = 0; tv.tv_usec = 0;
 
-    // 重置队列
-    squeue->len = 0;
-    int package_len = 0;
+// --- BURST MODE: Pre-build once, send repeatedly ---
+void run_burst_mode(pcap_t* fp, const SenderConfig* cfg) {
+    std::cout << "[INFO] Running BURST mode (Pre-built packets)." << std::endl;
 
-    // 本批次字节统计变量
-    uint64_t batch_bytes = 0;
+    // 1. 预构建一个包 (Pre-build the packet)
+    std::vector<unsigned char> raw_packet(10000, 0);
+    int packet_len = 0;
+    // 使用 seq_num = 1，因为在 burst 模式下内容固定不重要
+    build_package(raw_packet.data(), &packet_len, 1, cfg);
 
-    // 判断是否为 Burst 模式 (间隔为0)
-    bool is_burst = (cfg->send_interval_us == 0);
-
-    for (i = 0; i < npacks; i++) {
-        build_package(shared_buffer, &package_len, (int)seq_counter++, cfg);
-        if (package_len <= 0) continue;
-
-        pktheader.ts = tv;
-        pktheader.caplen = (bpf_u_int32)package_len;
-        pktheader.len = (bpf_u_int32)package_len;
-
-        if (pcap_sendqueue_queue(squeue, &pktheader, shared_buffer) == -1) {
-            // 队列满，不再添加
-            break;
-        }
-
-        // 累加准确的包长度
-        batch_bytes += package_len;
-
-        // 【修改】只有非 Burst 模式才需要计算时间戳间隔
-        // Burst 模式下所有包时间戳由驱动自动处理或忽略，减少CPU计算
-        if (!is_burst) {
-            add_stamp(&tv, cfg->send_interval_us);
-        }
-    }
-
-    if (squeue->len > 0) {
-        // 【核心修改】
-        // sync_flag = 1: 同步发送（按时间戳间隔发，适合定速）
-        // sync_flag = 0: 非同步发送（全速发，适合 Burst）
-        int sync_flag = is_burst ? 0 : 1;
-
-        pcap_sendqueue_transmit(fp, squeue, sync_flag);
-    }
-
-    return batch_bytes;
-}
-
-/* ==========================================================================
-   对外接口 (DLL Export - Modified for Burst)
-   ========================================================================== */
-extern "C" void start_send_mode(const SenderConfig* config) {
-    char errbuf[PCAP_ERRBUF_SIZE];
-
-    std::cout << "[INFO] Opening adapter: " << config->dev_name << std::endl;
-
-    if (!config || !config->dev_name[0]) {
-        std::cerr << "[ERROR] Invalid device name!" << std::endl;
+    if (packet_len <= 0) {
+        std::cerr << "[ERROR] Failed to build packet for burst mode." << std::endl;
         return;
     }
 
-    // 打开网卡
-    // mintime 设置为 1ms，保证此时尽可能快地响应
+    // 2. 准备发送队列 (Prepare the Queue)
+    const unsigned int npacks = 2048; // Batch size
+    // 申请足够的内存空间
+    unsigned int queue_mem_size = (packet_len + sizeof(struct pcap_pkthdr)) * npacks + 1000;
+    pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
+
+    if (!squeue) {
+        std::cerr << "[ERROR] Queue alloc failed." << std::endl;
+        return;
+    }
+
+    // 填充队列
+    struct pcap_pkthdr pktheader;
+    pktheader.ts.tv_sec = 0;
+    pktheader.ts.tv_usec = 0;
+    pktheader.caplen = packet_len;
+    pktheader.len = packet_len;
+
+    // 将同一个包复制 npacks 次填入队列
+    unsigned int actual_queued_packs = 0;
+    for (unsigned int i = 0; i < npacks; ++i) {
+        if (pcap_sendqueue_queue(squeue, &pktheader, raw_packet.data()) == -1) {
+            break;
+        }
+        actual_queued_packs++;
+    }
+
+    // [修正核心] 计算这一批次的真实数据量
+    // packet_len: 单个包长度 (e.g. 64)
+    // actual_queued_packs: 这一批有多少个包 (e.g. 2048)
+    uint64_t bytes_per_batch = (uint64_t)packet_len * actual_queued_packs;
+
+    // 初始化统计计时器
+    auto last_stats_time = std::chrono::steady_clock::now();
+
+    // 3. 极速发送循环 (Fast Send Loop)
+    while (g_is_sending) {
+        // sync = 0 表示忽略时间戳，全力发送
+        unsigned int sent_bytes = pcap_sendqueue_transmit(fp, squeue, 0);
+
+        // 如果 sent_bytes < squeue->len，说明发送可能没完全成功，
+        // 但在统计上我们通常假设批次发送是原子的，或者简单累加
+        // 既然是性能测试，我们按照理论值累加计数
+
+        // [修正核心] 累加的是包的个数，不是 squeue->len
+        g_total_sent += actual_queued_packs;
+
+        // [修正核心] 累加的是真实的载荷字节数
+        g_total_bytes += bytes_per_batch;
+
+        // 限制回调频率：每 200ms 更新一次 UI
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count();
+
+        if (elapsed_ms >= 200) {
+            if (cfg->stats_callback) {
+                cfg->stats_callback(g_total_sent, g_total_bytes);
+            }
+            last_stats_time = now;
+        }
+    }
+
+    // 退出时强制更新最后一次统计
+    if (cfg->stats_callback) {
+        cfg->stats_callback(g_total_sent, g_total_bytes);
+    }
+
+    pcap_sendqueue_destroy(squeue);
+}
+
+// --- NORMAL MODE: Rebuild per packet, respect intervals ---
+void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
+    std::cout << "[INFO] Running INTERVAL mode (Rebuild packets)." << std::endl;
+
+    // Calculate batch size based on interval to buffer ~1s worth or max 5000
+    unsigned int target_batch_time_us = 1000000;
+    unsigned int safe_interval = (cfg->send_interval_us == 0) ? 1 : cfg->send_interval_us;
+    unsigned int npacks = target_batch_time_us / safe_interval;
+    if (npacks < 1) npacks = 1;
+    if (npacks > 5000) npacks = 5000;
+
+    long long batch_duration_us = (long long)npacks * cfg->send_interval_us;
+
+    std::vector<unsigned char> shared_buffer(10000, 0);
+    unsigned int queue_mem_size = (2000 + sizeof(struct pcap_pkthdr)) * npacks;
+    pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
+
+    if (!squeue) return;
+
+    unsigned int seq_counter = 1;
+    auto next_batch_time = std::chrono::steady_clock::now();
+    struct pcap_pkthdr pktheader;
+    timeval tv; tv.tv_sec = 0; tv.tv_usec = 0;
+
+    while (g_is_sending) {
+        next_batch_time += std::chrono::microseconds(batch_duration_us);
+
+        // Clear queue for new batch
+        squeue->len = 0;
+        uint64_t batch_bytes = 0;
+        unsigned int actual_sent_packs = 0; // [修正] 新增变量，记录这一批实际放入的包数
+        int packet_len = 0;
+
+        // Build batch
+        for (unsigned int i = 0; i < npacks; ++i) {
+            build_package(shared_buffer.data(), &packet_len, (int)seq_counter++, cfg);
+            if (packet_len <= 0) continue;
+
+            pktheader.ts = tv;
+            pktheader.caplen = packet_len;
+            pktheader.len = packet_len;
+
+            if (pcap_sendqueue_queue(squeue, &pktheader, shared_buffer.data()) == -1) break;
+
+            batch_bytes += packet_len;
+            actual_sent_packs++; // [修正] 成功放入队列才 +1
+            add_stamp(&tv, cfg->send_interval_us);
+        }
+
+        if (squeue->len > 0) {
+            // sync = 1 : Respect timestamps
+            pcap_sendqueue_transmit(fp, squeue, 1);
+        }
+
+        // [修正核心]
+        // 错误写法: g_total_sent += squeue->len;
+        // 正确写法: 累加实际的包数
+        g_total_sent += actual_sent_packs;
+
+        // 累加字节数 (已经在循环里算好了)
+        g_total_bytes += batch_bytes;
+
+        if (cfg->stats_callback) {
+            cfg->stats_callback(g_total_sent, g_total_bytes);
+        }
+
+        // Precision Wait
+        auto now = std::chrono::steady_clock::now();
+        if (now < next_batch_time) {
+            auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(next_batch_time - now).count();
+            if (remaining > 1000) std::this_thread::sleep_for(std::chrono::microseconds(remaining));
+            else if (remaining > 0) std::this_thread::yield();
+        } else {
+            next_batch_time = std::chrono::steady_clock::now();
+        }
+    }
+
+    pcap_sendqueue_destroy(squeue);
+}
+/* ==========================================================================
+   Exported Entry Point
+   ========================================================================== */
+extern "C" void start_send_mode(const SenderConfig* config) {
+    char errbuf[PCAP_ERRBUF_SIZE];
+    if (!config || !config->dev_name[0]) return;
+
     pcap_t* handler = pcap_open(config->dev_name, 65535, PCAP_OPENFLAG_PROMISCUOUS, 1, NULL, errbuf);
     if (!handler) {
         std::cerr << "[ERROR] pcap_open failed: " << errbuf << std::endl;
         return;
     }
 
-    SenderConfig cfg = *config;
-    bool is_burst_mode = (cfg.send_interval_us == 0);
-
-    if (is_burst_mode) {
-        std::cout << "[INFO] Adapter opened. Mode: BURST (Full Speed)." << std::endl;
+    // Branch execution based on interval
+    if (config->send_interval_us == 0) {
+        run_burst_mode(handler, config);
     } else {
-        std::cout << "[INFO] Adapter opened. Mode: Sync Batching (Interval: " << cfg.send_interval_us << "us)." << std::endl;
+        run_normal_mode(handler, config);
     }
 
-    // --- 1. 计算批次参数 ---
-    unsigned int npacks;
-
-    if (is_burst_mode) {
-        // 【修改】Burst 模式：设置较大的固定批次
-        // 这决定了单次系统调用发送多少个包。
-        // 2048 是一个经验值，既能保证吞吐量，又不会让 pcap_sendqueue_alloc 占用过多内存
-        npacks = 2048;
-    } else {
-        // 定时模式：计算 1秒 内的包量作为缓冲基准
-        unsigned int target_batch_time_us = 1000000;
-        unsigned int safe_interval = (cfg.send_interval_us == 0) ? 1 : cfg.send_interval_us;
-        npacks = target_batch_time_us / safe_interval;
-        if (npacks < 1) npacks = 1;
-        if (npacks > 5000) npacks = 5000; // 限制最大值
-    }
-
-    // 计算这一批包理论上总共需要消耗多少时间 (仅用于定速模式)
-    long long batch_duration_us = (long long)npacks * cfg.send_interval_us;
-
-    // --- 2. 内存池预分配 ---
-    // 预留足够大的 buffer (假设最大包长 10000 字节，实际通常是 1514)
-    std::vector<unsigned char> shared_buffer(10000, 0);
-
-    // 分配队列内存
-    unsigned int queue_mem_size = (2000 + sizeof(struct pcap_pkthdr)) * npacks; // 2000 字节足够容纳 MTU
-    pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
-
-    if (!squeue) {
-        std::cerr << "[ERROR] pcap_sendqueue_alloc failed!" << std::endl;
-        pcap_close(handler);
-        return;
-    }
-
-    unsigned int current_seq_num = 1;
-
-    // --- 3. 初始化时间基准 ---
-    auto next_batch_time = std::chrono::steady_clock::now();
-
-    std::cout << "[INFO] Sending loop started." << std::endl;
-
-    while (g_is_sending) {
-        // 计算下一轮时间点 (仅定速模式需要)
-        if (!is_burst_mode) {
-            next_batch_time += std::chrono::microseconds(batch_duration_us);
-        }
-
-        // 调用发送
-        uint64_t bytes_sent_this_batch = send_queue(handler, npacks, &cfg, current_seq_num, squeue, shared_buffer.data());
-
-        // === 更新全局统计 ===
-        g_total_sent += npacks;
-        g_total_bytes += bytes_sent_this_batch;
-
-        // 回调通知
-        if (cfg.stats_callback) {
-            cfg.stats_callback(g_total_sent, g_total_bytes);
-        }
-
-        // --- 4. 批次间补时 (Burst 模式自动跳过) ---
-        // cfg.send_interval_us 为 0 时，此 if 不成立，循环全速运行
-        if (!is_burst_mode) {
-            auto now = std::chrono::steady_clock::now();
-            if (now < next_batch_time) {
-                auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(next_batch_time - now).count();
-                if (remaining > 1000) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(remaining));
-                }
-                else if (remaining > 0) {
-                    std::this_thread::yield();
-                }
-            }
-            else {
-                // 防滞后重置
-                next_batch_time = std::chrono::steady_clock::now();
-            }
-        }
-    }
-
-    // --- 5. 清理资源 ---
-    pcap_sendqueue_destroy(squeue);
     pcap_close(handler);
-    std::cout << "\n[INFO] Sending stopped." << std::endl;
+    std::cout << "[INFO] Sending stopped." << std::endl;
 }
+
+// === Socket Sender (Unchanged) ===
+#define LOG_SOCK(level, fmt, ...) do { \
+if (config->log_callback) { \
+        char buf[512]; \
+        snprintf(buf, sizeof(buf), fmt, ##__VA_ARGS__); \
+        config->log_callback(buf, level); \
+} \
+} while(0)
+
+    extern "C" void start_socket_send_mode(const SocketConfig* config) {
+        if (!config) return;
+
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return;
+
+        SOCKET sockfd = INVALID_SOCKET;
+        int type = config->is_udp ? SOCK_DGRAM : SOCK_STREAM;
+        int proto = config->is_udp ? IPPROTO_UDP : IPPROTO_TCP;
+
+        sockfd = socket(AF_INET, type, proto);
+        if (sockfd == INVALID_SOCKET) {
+            WSACleanup();
+            return;
+        }
+
+        if (config->source_ip[0] != '\0' && strcmp(config->source_ip, "0.0.0.0") != 0 && strcmp(config->source_ip, "") != 0) {
+            struct sockaddr_in local_addr;
+            memset(&local_addr, 0, sizeof(local_addr));
+            local_addr.sin_family = AF_INET;
+            local_addr.sin_addr.s_addr = inet_addr(config->source_ip);
+            local_addr.sin_port = 0;
+            bind(sockfd, (struct sockaddr*)&local_addr, sizeof(local_addr));
+        }
+
+        struct sockaddr_in dest_addr;
+        memset(&dest_addr, 0, sizeof(dest_addr));
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(config->target_port);
+        dest_addr.sin_addr.s_addr = inet_addr(config->target_ip);
+
+        if (!config->is_udp) {
+            u_long mode = 1;
+            ioctlsocket(sockfd, FIONBIO, &mode);
+            int connect_ret = connect(sockfd, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+            bool connected = false;
+
+            if (connect_ret == 0) connected = true;
+            else {
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK) {
+                    int max_retries = 30;
+                    for (int i = 0; i < max_retries; ++i) {
+                        if (!g_is_sock_sending) break;
+                        fd_set write_fds, except_fds;
+                        FD_ZERO(&write_fds); FD_SET(sockfd, &write_fds);
+                        FD_ZERO(&except_fds); FD_SET(sockfd, &except_fds);
+                        timeval tv; tv.tv_sec = 0; tv.tv_usec = 100000;
+                        int sel_ret = select(0, NULL, &write_fds, &except_fds, &tv);
+                        if (sel_ret > 0) {
+                            if (FD_ISSET(sockfd, &write_fds)) { connected = true; break; }
+                            if (FD_ISSET(sockfd, &except_fds)) break;
+                        }
+                    }
+                }
+            }
+            mode = 0;
+            ioctlsocket(sockfd, FIONBIO, &mode);
+            if (!connected) {
+                closesocket(sockfd);
+                WSACleanup();
+                return;
+            }
+        }
+
+        int data_len = config->payload_len;
+        if (data_len <= 0) data_len = 1;
+        std::vector<char> send_buffer(data_len, 'X');
+
+        auto last_stats_time = std::chrono::steady_clock::now();
+        auto next_send_time = std::chrono::steady_clock::now();
+        bool is_burst = (config->interval_us == 0);
+
+        while (g_is_sock_sending) {
+            int sent = -1;
+            if (config->is_udp) {
+                sent = sendto(sockfd, send_buffer.data(), data_len, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+            } else {
+                sent = send(sockfd, send_buffer.data(), data_len, 0);
+            }
+
+            if (sent > 0) {
+                g_sock_total_sent++;
+                g_sock_total_bytes += sent;
+            } else {
+                int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    if (!config->is_udp && (err == WSAECONNRESET || err == WSAECONNABORTED)) break;
+                }
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (config->stats_callback) {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count();
+                if (elapsed_ms >= 30) {
+                    config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+                    last_stats_time = now;
+                }
+            }
+
+            if (!is_burst) {
+                next_send_time += std::chrono::microseconds(config->interval_us);
+                if (next_send_time > now) {
+                    auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(next_send_time - now).count();
+                    if (wait_us > 100000) {
+                        while (wait_us > 0 && g_is_sock_sending) {
+                            int sleep_slice = (wait_us > 100000) ? 100000 : wait_us;
+                            std::this_thread::sleep_for(std::chrono::microseconds(sleep_slice));
+                            wait_us -= sleep_slice;
+                            if (!g_is_sock_sending) break;
+                        }
+                    } else {
+                        if (wait_us > 1000) std::this_thread::sleep_for(std::chrono::microseconds(wait_us));
+                        else while (std::chrono::steady_clock::now() < next_send_time) {}
+                    }
+                } else {
+                    next_send_time = std::chrono::steady_clock::now();
+                }
+            }
+        }
+
+        if (config->stats_callback) config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+        closesocket(sockfd);
+        WSACleanup();
+    }
 #pragma pack()

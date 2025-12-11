@@ -130,6 +130,52 @@ signals:
 private:
     static PacketWorker* m_instance;
 };
+// ============================================================================
+// sender_window.h -> SocketWorker 类完整定义
+// ============================================================================
+class SocketWorker : public QObject {
+    Q_OBJECT
+public:
+    SocketConfig config;
+    static SocketWorker* m_instance;
+
+    // 统计数据代理
+    static void StatsCallbackProxy(uint64_t sent, uint64_t bytes) {
+        if (m_instance) {
+            emit m_instance->statsUpdated(sent, bytes);
+        }
+    }
+
+    // [新增] 日志数据代理
+    static void LogCallbackProxy(const char* msg, int level) {
+        if (m_instance) {
+            // 将 C-Style 字符串转为 Qt 字符串并跨线程发射
+            emit m_instance->logUpdated(QString::fromLocal8Bit(msg), level);
+        }
+    }
+
+public slots:
+    void doWork() {
+        m_instance = this;
+
+        // 注册回调函数
+        config.stats_callback = &SocketWorker::StatsCallbackProxy;
+        config.log_callback   = &SocketWorker::LogCallbackProxy; // [新增]
+
+        g_is_sock_sending = true;
+        start_socket_send_mode(&config);
+
+        m_instance = nullptr;
+        emit workFinished();
+    }
+
+signals:
+    void workFinished();
+    void statsUpdated(uint64_t sent, uint64_t bytes);
+
+    // [新增] 日志信号
+    void logUpdated(QString msg, int level);
+};
 
 // ============================================================================
 // MainWindow 类
@@ -149,6 +195,9 @@ private slots:
     void updateStats(uint64_t currSent, uint64_t currBytes);
     void onInterfaceSelectionChanged(int index);
     void onGetDstMacClicked();
+    void onSockStartClicked();
+    void onSockStopClicked();
+    void updateSockStats(uint64_t sent, uint64_t bytes);
 
 private:
     void loadInterfaces();
@@ -194,4 +243,11 @@ private:
     qint64 m_chartTimeX;
     double m_maxPPS;
     double m_maxMbps;
+
+    QThread *sockThread;
+    SocketWorker *sockWorker;
 };
+
+
+
+
