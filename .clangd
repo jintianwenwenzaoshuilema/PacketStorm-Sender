@@ -1,0 +1,13 @@
+CompileFlags:
+  Add:
+    - -IC:/WpdPack/Include
+    - -IC:/Qt/6.8.3/mingw_64/include
+    - -IC:/Qt/6.8.3/mingw_64/include/QtCore
+    - -IC:/Qt/6.8.3/mingw_64/include/QtGui
+    - -IC:/Qt/6.8.3/mingw_64/include/QtWidgets
+    - -IC:/Qt/6.8.3/mingw_64/include/QtNetwork
+    - -IC:/Qt/6.8.3/mingw_64/include/QtCharts
+    - -DWIN32
+    - -DWPCAP
+    - -DHAVE_REMOTE
+    - -std=c++20

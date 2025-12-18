@@ -25,6 +25,10 @@
 #include <QtCharts/QValueAxis>
 #include <QtCharts/QChart>
 
+#include <QTableWidget>
+#include <QMouseEvent>
+#include "hex_delegate.h" // [新增] 引入头文件
+
 
 namespace Ui {
 class MainWindow;
@@ -107,6 +111,18 @@ public:
         }
     }
 
+    // [新增] Hex 代理函数
+    static void HexCallbackProxy(const unsigned char* data, int len) {
+        if (m_instance) {
+            // 原代码：int showLen = (len > 48) ? 48 : len;
+            // 修改后：直接使用 len，或者设置一个非常大的上限（如 65535）防止极个别情况崩溃
+            // 但通常直接发完整包即可，因为以太网包最大也就 1500 左右
+
+            QByteArray b((const char*)data, len);
+            emit m_instance->hexUpdated(b);
+        }
+    }
+
 public slots:
     void doSendWork() {
         m_instance = this;
@@ -118,6 +134,9 @@ public slots:
             config.custom_data_len = 0;
         }
         config.stats_callback = &PacketWorker::StatsCallbackProxy;
+        // [新增] 注册回调
+        config.hex_callback = &PacketWorker::HexCallbackProxy;
+
         g_is_sending = true;
         start_send_mode(&config);
         m_instance = nullptr;
@@ -126,6 +145,8 @@ public slots:
 signals:
     void workFinished();
     void statsUpdated(uint64_t sent, uint64_t bytes);
+    // [新增] 信号
+    void hexUpdated(QByteArray data);
 
 private:
     static PacketWorker* m_instance;
@@ -186,6 +207,7 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onStartSendClicked();
@@ -209,6 +231,26 @@ private:
 
     void setupChart();
 
+    void setupTrafficTable();
+    void addPacketToTable(const QByteArray& data);
+
+    HexRenderDelegate* m_hexDelegate;
+
+    void setupHexTableStyle();
+    void updateHexTable(const QByteArray& data);
+
+    // 简易协议解析器
+    struct PacketInfo {
+        QString src;
+        QString dst;
+        QString proto;
+        QString info;
+        int length;
+    };
+    PacketInfo parsePacket(const QByteArray& data);
+
+    int m_packetCount = 0; // 记录包序号
+
     Ui::MainWindow *ui;
     QThread *workerThread;
     PacketWorker *worker;
@@ -221,6 +263,8 @@ private:
     StatusDashboard m_dashboard;
     QLabel *lblTargetPPS;
     QPushButton *btnGetMac;
+
+    QList<double> m_ppsHistory;
 
 
     QList<double> m_rawByteHistory;

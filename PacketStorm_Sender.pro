@@ -16,6 +16,7 @@ SOURCES += \
     sender_window.cpp
 
 HEADERS += \
+    hex_delegate.h \
     sender_core.h \
     sender_window.h
 
