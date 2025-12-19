@@ -13,12 +13,14 @@ CONFIG += c++17
 SOURCES += \
     main.cpp \
     sender_core.cpp \
-    sender_window.cpp
+    sender_window.cpp \
+    resource_monitor.cpp
 
 HEADERS += \
     hex_delegate.h \
     sender_core.h \
-    sender_window.h
+    sender_window.h \
+    resource_monitor.h
 
 FORMS += \
     sender.ui
@@ -30,7 +32,7 @@ CONFIG += c++20
 
 
 INCLUDEPATH += "C:\WpdPack\Include"
-LIBS += "-LC:\WpdPack\Lib\x64" -lwpcap -lws2_32 -liphlpapi
+LIBS += "-LC:\WpdPack\Lib\x64" -lwpcap -lws2_32 -liphlpapi -lpdh -lpsapi
 
 DEFINES += WIN32
 DEFINES += WPCAP

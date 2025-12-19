@@ -37,6 +37,14 @@
                 #0b0f19; color: #4a5568; border: 1px dashed #2d3748; }
                 QSpinBox::up-button, QSpinBox::down-button { background-color: #0b0f19; border:
                 none; }
+                /* Interval SpinBox 透明背景 */
+                /* Interval SpinBox 透明背景 */
+                QSpinBox#spinInterval { background-color: transparent; }
+                QSpinBox#spinInterval:focus { background-color: transparent; }
+                QSpinBox#spinInterval::up-button, QSpinBox#spinInterval::down-button {
+                background-color: transparent; }
+                /* Target PPS Label 透明背景 */
+                QLabel { background-color: transparent; }
 
                 /* 按钮样式 */
                 QPushButton { border: none; border-radius: 2px; padding: 8px; font-weight: bold;
@@ -193,14 +201,19 @@
                                                             <number>8</number>
                                                         </property>
                                                         <item>
-                                                            <widget class="QLineEdit"
+                                                            <widget class="QComboBox"
                                                                 name="editDstMac">
-                                                                <property name="text">
+                                                                <property name="editable">
+                                                                    <bool>true</bool>
+                                                                </property>
+                                                                <property name="currentText">
                                                                     <string>FF:FF:FF:FF:FF:FF</string>
                                                                 </property>
-                                                                <property name="placeholderText">
-                                                                    <string>AA:BB:CC:DD:EE:FF</string>
-                                                                </property>
+                                                                <item>
+                                                                    <property name="text">
+                                                                        <string>FF:FF:FF:FF:FF:FF</string>
+                                                                    </property>
+                                                                </item>
                                                             </widget>
                                                         </item>
                                                         <item>
@@ -215,6 +228,12 @@
                                                                 <property name="text">
                                                                     <string>GET</string>
                                                                 </property>
+                                                                <property name="maximumSize">
+                                                                    <size>
+                                                                        <width>50</width>
+                                                                        <height>16777215</height>
+                                                                    </size>
+                                                                </property>
                                                                 <property name="styleSheet">
                                                                     <string notr="true">QPushButton
                                                                         { background-color: rgba(0,
@@ -222,7 +241,8 @@
                                                                         solid #00f0ff; color:
                                                                         #00f0ff; padding: 5px;
                                                                         font-size: 11px; min-width:
-                                                                        40px; } QPushButton:hover {
+                                                                        40px; max-width: 50px; }
+                                                                        QPushButton:hover {
                                                                         background-color: #00f0ff;
                                                                         color: #000000; }</string>
                                                                 </property>

@@ -165,7 +165,9 @@ static bool GetExtendedNetworkInfo(const QString& srcIp, QString& outMask, QStri
 // ============================================================================
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), workerThread(nullptr), worker(nullptr), stopBtnAnim(nullptr),
-      stopBtnEffect(nullptr), sockThread(nullptr), sockWorker(nullptr) {
+      stopBtnEffect(nullptr), sockThread(nullptr), sockWorker(nullptr), m_resourceMonitor(nullptr),
+      m_cpuWidget(nullptr), m_memoryWidget(nullptr), m_uploadWidget(nullptr), m_downloadWidget(nullptr),
+      m_packetsLabel(nullptr), m_bytesLabel(nullptr), m_resourceContainer(nullptr) {
     ui->setupUi(this);
     setupHexTableStyle();
 
@@ -177,7 +179,7 @@ MainWindow::MainWindow(QWidget* parent)
     newSpin->setSingleStep(ui->spinInterval->singleStep());
     newSpin->setObjectName("spinInterval");
     newSpin->setFont(ui->spinInterval->font());
-    newSpin->setStyleSheet(ui->spinInterval->styleSheet());
+    // 样式在 UI 文件中设置
     ui->formLayout_Param->replaceWidget(ui->spinInterval, newSpin);
     delete ui->spinInterval;
     ui->spinInterval = newSpin;
@@ -202,19 +204,35 @@ MainWindow::MainWindow(QWidget* parent)
     QRegularExpression macRegex("^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$");
     QRegularExpressionValidator* macVal = new QRegularExpressionValidator(macRegex, this);
     ui->editSrcMac->setValidator(macVal);
-    ui->editDstMac->setValidator(macVal);
+    // editDstMac 现在是 QComboBox，需要通过 lineEdit() 设置验证器和占位符
+    QComboBox* dstMacCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+    if (dstMacCombo && dstMacCombo->lineEdit()) {
+        dstMacCombo->lineEdit()->setValidator(macVal);
+        dstMacCombo->lineEdit()->setPlaceholderText("AA:BB:CC:DD:EE:FF");
+    }
 
     ui->editSrcMac->setPlaceholderText("AA:BB:CC:DD:EE:FF");
-    ui->editDstMac->setPlaceholderText("AA:BB:CC:DD:EE:FF");
 
-    // 3. 状态栏
+    // [优化] 设置 GET 按钮的固定宽度，避免被拉伸
+    if (ui->btnGetMac) {
+        ui->btnGetMac->setMaximumWidth(50);
+        ui->btnGetMac->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    }
+
+    // 3. 状态栏 - 用于显示鼠标所在位置控件的tooltip
     QStatusBar* bar = new QStatusBar(this);
+    bar->setStyleSheet("QStatusBar { background: #0f121a; color: #718096; border-top: 1px solid #1c2333; }"
+                       "QStatusBar::item { border: none; }");
     setStatusBar(bar);
-    m_dashboard.init(bar, this);
+
+    // 为所有子控件安装事件过滤器，用于显示鼠标所在位置控件的tooltip
+    // 注意：eventFilter已经在类中实现，这里只需要确保所有控件都能接收到事件
+    // 由于eventFilter会处理所有事件，我们需要在eventFilter中检查watched对象
 
     // 4. PPS 标签
     lblTargetPPS = new QLabel("Rate: -- pps", this);
     lblTargetPPS->setStyleSheet("color: #FFB74D; font-size: 11px;");
+    // 透明背景在 UI 文件中通过全局 QLabel 样式设置
     ui->formLayout_Param->addRow("", lblTargetPPS);
 
     // 5. 信号连接
@@ -222,12 +240,15 @@ MainWindow::MainWindow(QWidget* parent)
         if (intervalUs <= 0) {
             lblTargetPPS->setText("Target: Max Speed");
         } else {
-            double pps = 1000000.0 / (double)intervalUs;
+            constexpr double MICROSECONDS_PER_SECOND = 1000000.0;
+            double pps = MICROSECONDS_PER_SECOND / (double)intervalUs;
             QString ppsText;
-            if (pps >= 1000000)
-                ppsText = QString::number(pps / 1000000.0, 'f', 2) + " Mpps";
-            else if (pps >= 1000)
-                ppsText = QString::number(pps / 1000.0, 'f', 1) + " kpps";
+            constexpr double MEGA_PPS = 1000000.0;
+            constexpr double KILO_PPS = UIConfig::PACKETS_PER_KILOPACKET;
+            if (pps >= MEGA_PPS)
+                ppsText = QString::number(pps / MEGA_PPS, 'f', 2) + " Mpps";
+            else if (pps >= KILO_PPS)
+                ppsText = QString::number(pps / KILO_PPS, 'f', 1) + " kpps";
             else
                 ppsText = QString::number((int)pps) + " pps";
             lblTargetPPS->setText("Target: " + ppsText);
@@ -261,7 +282,26 @@ MainWindow::MainWindow(QWidget* parent)
 
     setupChart();
     loadHistory();
+    loadMacHistory();
     loadConfig();
+
+    // [新增] 启动系统资源监控
+    if (m_resourceMonitor) {
+        m_resourceMonitor->startMonitoring(1000); // 每秒更新一次
+
+        // 设置初始监控的网卡
+        QString currentInterface = ui->comboInterfaceTx->currentData().toString();
+        if (!currentInterface.isEmpty()) {
+            m_resourceMonitor->setMonitorInterface(currentInterface);
+        }
+    }
+
+    // [新增] 为所有子控件安装事件过滤器，用于在状态栏显示tooltip
+    // 使用递归方式为所有子控件安装事件过滤器
+    installEventFilterRecursive(this);
+
+    // [新增] 为所有控件设置tooltip
+    setupTooltips();
 
     onProtoToggled();
     onPayloadModeChanged();
@@ -285,6 +325,12 @@ MainWindow::~MainWindow() {
     if (sockThread) {
         sockThread->quit();
         sockThread->wait();
+    }
+
+    // [新增] 停止资源监控
+    if (m_resourceMonitor) {
+        m_resourceMonitor->stopMonitoring();
+        delete m_resourceMonitor;
     }
 
     if (stopBtnAnim) {
@@ -421,7 +467,7 @@ void MainWindow::setupChart() {
     };
 
     auto configAxisX = [](QValueAxis* axis) {
-        axis->setRange(0, 60);
+        axis->setRange(0, UIConfig::CHART_TIME_RANGE);
         axis->setLabelFormat("%d");
         axis->setLabelsColor(QColor("#718096"));
         axis->setGridLineColor(QColor("#1c2333"));
@@ -452,7 +498,7 @@ void MainWindow::setupChart() {
 
     axisY_PPS = new QValueAxis();
     configAxisY(axisY_PPS, "#00e676", "%d");
-    axisY_PPS->setRange(0, 1000);
+    axisY_PPS->setRange(0, UIConfig::CHART_PPS_MAX_Y);
     chartPPS->addAxis(axisY_PPS, Qt::AlignLeft);
     seriesPPS->attachAxis(axisY_PPS);
 
@@ -492,18 +538,23 @@ void MainWindow::setupChart() {
     // =========================================================
     // 这里的 ui->grpChart 是我们在 UI 设计器里预留的 GroupBox
     QVBoxLayout* layout = new QVBoxLayout(ui->grpChart);
-    layout->setContentsMargins(2, 10, 2, 2);
-    layout->setSpacing(5); // 两个图表之间的间距
+    layout->setContentsMargins(UIConfig::CHART_LAYOUT_MARGIN_LEFT, UIConfig::CHART_LAYOUT_MARGIN_TOP,
+                               UIConfig::CHART_LAYOUT_MARGIN_RIGHT, UIConfig::CHART_LAYOUT_MARGIN_BOTTOM);
+    layout->setSpacing(UIConfig::CHART_LAYOUT_SPACING); // 两个图表之间的间距
 
     layout->addWidget(viewPPS); // 上面放 PPS
     layout->addWidget(viewBW);  // 下面放 BW
+
+    // [新增] 添加系统资源监控区域
+    setupResourceMonitor();
+    layout->addWidget(m_resourceContainer);
 
     // 只有第一次需要设置伸缩因子，保证平分高度
     // 但在 QVBoxLayout 中默认就是平分的
 
     m_chartTimeX = 0;
-    m_maxPPS = 100;
-    m_maxMbps = 10;
+    m_maxPPS = UIConfig::CHART_PPS_DEFAULT_MAX;
+    m_maxMbps = UIConfig::CHART_BW_DEFAULT_MAX;
 }
 
 void MainWindow::loadInterfaces() {
@@ -565,6 +616,12 @@ void MainWindow::onInterfaceSelectionChanged(int index) {
         QString interfaceName = ui->comboInterfaceTx->itemText(index);
         appendLog("Failed to fetch info for selected interface: " + interfaceName, 2);
     }
+
+    // [新增] 更新资源监控的网卡选择
+    if (m_resourceMonitor) {
+        m_resourceMonitor->setMonitorInterface(pcapName);
+    }
+
     // 保存当前选择的网口
     saveConfig();
 }
@@ -646,13 +703,17 @@ void MainWindow::onGetDstMacClicked() {
                             macStr += QString().asprintf("%.2X:", (int)bPhysAddr[i]);
                     }
                 }
-                ui->editDstMac->setText(macStr);
+                // editDstMac 现在是 QComboBox，使用 setEditText()
+                // editDstMac 现在是 QComboBox，使用 setEditText()
+                QComboBox* dstMacCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+                if (dstMacCombo) {
+                    dstMacCombo->setEditText(macStr);
+                    dstMacCombo->setFocus();
+                    dstMacCombo->lineEdit()->selectAll();
+                }
 
                 // 提示用户解析的是哪个 IP 的 MAC
                 appendLog("MAC Resolved (" + actualArpTargetStr + "): " + macStr, 1);
-
-                ui->editDstMac->setFocus();
-                ui->editDstMac->selectAll();
 
             } else {
                 QString errApi;
@@ -726,8 +787,12 @@ void MainWindow::onProtoToggled() {
     if (isArp) {
         ui->spinPktLen->setEnabled(false); // ARP 长度固定
         // 提示用户：广播 ARP 请将 DstMAC 设为 FF:FF...
-        if (ui->editDstMac->text().isEmpty()) {
-            ui->editDstMac->setText("FF:FF:FF:FF:FF:FF");
+        QComboBox* dstMacCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+        if (dstMacCombo) {
+            QString currentMac = dstMacCombo->currentText();
+            if (currentMac.isEmpty()) {
+                dstMacCombo->setEditText("FF:FF:FF:FF:FF:FF");
+            }
         }
     } else {
         ui->spinPktLen->setEnabled(true);
@@ -795,15 +860,15 @@ void MainWindow::setupTrafficTable() {
     // 3. 设置初始列宽
     // 给每一列足够的宽度，总宽度加起来要超过 Splitter
     // 分给它的区域，滚动条才会出现
-    ui->tablePackets->setColumnWidth(0, 60);  // No.
-    ui->tablePackets->setColumnWidth(1, 110); // Time
-    ui->tablePackets->setColumnWidth(2, 140); // Source (宽一点显示完整IP)
-    ui->tablePackets->setColumnWidth(3, 140); // Destination
-    ui->tablePackets->setColumnWidth(4, 60);  // Proto
-    ui->tablePackets->setColumnWidth(5, 50);  // Len
+    ui->tablePackets->setColumnWidth(0, UIConfig::TABLE_COL_WIDTH_NO);      // No.
+    ui->tablePackets->setColumnWidth(1, UIConfig::TABLE_COL_WIDTH_TIME);    // Time
+    ui->tablePackets->setColumnWidth(2, UIConfig::TABLE_COL_WIDTH_ADDRESS); // Source (宽一点显示完整IP)
+    ui->tablePackets->setColumnWidth(3, UIConfig::TABLE_COL_WIDTH_ADDRESS); // Destination
+    ui->tablePackets->setColumnWidth(4, UIConfig::TABLE_COL_WIDTH_PROTO);   // Proto
+    ui->tablePackets->setColumnWidth(5, UIConfig::TABLE_COL_WIDTH_LEN);     // Len
 
     // [关键修改] 给 Info 列一个固定的、足够宽的宽度
-    ui->tablePackets->setColumnWidth(6, 400); // Info
+    ui->tablePackets->setColumnWidth(6, UIConfig::TABLE_COL_WIDTH_INFO); // Info
 
     // =========================================================
 
@@ -893,17 +958,20 @@ MainWindow::PacketInfo MainWindow::parsePacket(const QByteArray& data) {
         // Protocol Analysis
         if (protocol == 1) { // ICMP
             info.proto = "ICMP";
-            if (data.size() > 34) {
+            if (data.size() > 42) { // 需要至少 34 + 8 字节（ICMP 头）
                 uint8_t type = bytes[34];
-                uint16_t seq = (bytes[38] << 8) | bytes[39];
+                // ICMP Echo 包结构（从偏移 34 开始）:
+                // bytes[34] = type (1 byte)
+                // bytes[35] = code (1 byte)
+                // bytes[36-37] = checksum (2 bytes)
+                // bytes[38-39] = ident (2 bytes) - 这是 id
+                // bytes[40-41] = seq (2 bytes) - 这是序列号
+                uint16_t ident = (bytes[38] << 8) | bytes[39]; // ident (id)
+                uint16_t seq = (bytes[40] << 8) | bytes[41];   // seq (序列号)
                 if (type == 8)
-                    info.info = QString("Echo (ping) request  id=0x%1 seq=%2")
-                                    .arg((bytes[36] << 8) | bytes[37], 0, 16)
-                                    .arg(seq);
+                    info.info = QString("Echo (ping) request  id=0x%1 seq=%2").arg(ident, 0, 16).arg(seq);
                 else if (type == 0)
-                    info.info = QString("Echo (ping) reply    id=0x%1 seq=%2")
-                                    .arg((bytes[36] << 8) | bytes[37], 0, 16)
-                                    .arg(seq);
+                    info.info = QString("Echo (ping) reply    id=0x%1 seq=%2").arg(ident, 0, 16).arg(seq);
                 else
                     info.info = QString("Type: %1").arg(type);
             }
@@ -959,7 +1027,12 @@ void MainWindow::onStartSendClicked() {
 
     // 2. 保存历史与配置
     saveHistory(ui->editDstIp->currentText());
+    // editDstMac 现在是 QComboBox，使用 currentText()
+    QString dstMac = qobject_cast<QComboBox*>(ui->editDstMac)->currentText();
+    saveMacHistory(dstMac);
     saveConfig();
+
+    // 注意：dstMac 变量在后面还会使用，所以在这里声明
 
     // 3. 重置全局统计
     g_total_sent = 0;
@@ -968,15 +1041,15 @@ void MainWindow::onStartSendClicked() {
     lastTotalBytes = 0;
     rateTimer.start();
 
-    // 4. 重置 Dashboard 和图表
-    m_dashboard.updateUI(0, 0, 0, 0);
+    // 4. 重置统计显示和图表
+    updateStatsDisplay(0, 0);
     seriesPPS->clear();
     seriesMbps->clear();
     m_ppsHistory.clear();
     m_rawByteHistory.clear();
     m_chartTimeX = 0;
-    axisX_PPS->setRange(0, 60);
-    axisX_BW->setRange(0, 60);
+    axisX_PPS->setRange(0, UIConfig::CHART_TIME_RANGE);
+    axisX_BW->setRange(0, UIConfig::CHART_TIME_RANGE);
 
     // ========================================================================
     // [UI Reset] Wireshark 风格列表初始化
@@ -1021,7 +1094,9 @@ void MainWindow::onStartSendClicked() {
     };
 
     parseMac(ui->editSrcMac->text(), worker->config.src_mac);
-    parseMac(ui->editDstMac->text(), worker->config.des_mac);
+    // editDstMac 现在是 QComboBox，使用 currentText()
+    // dstMac 变量已在上面声明，这里直接使用
+    parseMac(dstMac, worker->config.des_mac);
     parseIp(ui->editSrcIp->text(), worker->config.src_ip);
     parseIp(ui->editDstIp->currentText(), worker->config.des_ip);
 
@@ -1072,6 +1147,14 @@ void MainWindow::onStartSendClicked() {
     connect(workerThread, &QThread::started, worker, &PacketWorker::doSendWork);
     connect(worker, &PacketWorker::workFinished, workerThread, &QThread::quit);
     connect(worker, &PacketWorker::statsUpdated, this, &MainWindow::updateStats, Qt::QueuedConnection);
+    // [新增] 连接错误信号
+    connect(
+        worker, &PacketWorker::errorOccurred, this,
+        [this](QString error_msg) {
+            appendLog("[ERROR] " + error_msg, 2);
+            QMessageBox::critical(this, "发送错误", error_msg);
+        },
+        Qt::QueuedConnection);
 
     // ========================================================================
     // [核心] Wireshark 风格数据流更新逻辑
@@ -1084,8 +1167,8 @@ void MainWindow::onStartSendClicked() {
             // 调用成员函数 parsePacket
             PacketInfo info = parsePacket(data);
 
-            // 2. 限制行数 (防止内存溢出，保留最近 1000 条)
-            if (ui->tablePackets->rowCount() > 1000) {
+            // 2. 限制行数 (防止内存溢出，保留最近 N 条)
+            if (ui->tablePackets->rowCount() > UIConfig::MAX_PACKET_TABLE_ROWS) {
                 ui->tablePackets->removeRow(0);
             }
 
@@ -1150,9 +1233,9 @@ void MainWindow::onStartSendClicked() {
     }
     if (!stopBtnAnim) {
         stopBtnAnim = new QPropertyAnimation(stopBtnEffect, "blurRadius", this);
-        stopBtnAnim->setDuration(1500);
-        stopBtnAnim->setStartValue(20);
-        stopBtnAnim->setEndValue(60);
+        stopBtnAnim->setDuration(UIConfig::STOP_BUTTON_ANIM_DURATION);
+        stopBtnAnim->setStartValue(UIConfig::STOP_BUTTON_ANIM_START);
+        stopBtnAnim->setEndValue(UIConfig::STOP_BUTTON_ANIM_END);
         stopBtnAnim->setEasingCurve(QEasingCurve::InOutSine);
         stopBtnAnim->setLoopCount(-1);
     }
@@ -1173,7 +1256,10 @@ void MainWindow::onStopSendClicked() {
 
     // 2. 我们只更新底部的“数字”显示，确保显示的是最终的原子计数
     // 参数3和4传 0，表示停止时的瞬时速率为 0
-    m_dashboard.updateUI(g_total_sent.load(), g_total_bytes.load(), 0, 0);
+    updateStatsDisplay(g_total_sent.load(), g_total_bytes.load());
+
+    // 注意：中间的速度显示（Upload/Download）会继续显示网卡的总流量
+    // 这是正常的，因为速率统计独立于发送状态，软件启动时就开始统计
 
     // 3. 记录日志
     QString summary =
@@ -1197,7 +1283,7 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
     qint64 elapsedMs = rateTimer.elapsed();
 
     // 过滤过短的更新（防止除以接近0的数）
-    if (elapsedMs < 50) return;
+    if (elapsedMs < UIConfig::STATS_UPDATE_MIN_INTERVAL_MS) return;
 
     // 立即重置计时器，保证下一次计算的时间基准是“现在”
     rateTimer.restart();
@@ -1212,7 +1298,7 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
         lastTotalSent = currSent;
         lastTotalBytes = currBytes;
         // 可以选择更新一下界面数字，但不更新图表和速率
-        m_dashboard.updateUI(currSent, currBytes, 0, 0);
+        updateStatsDisplay(currSent, currBytes);
         return;
     }
 
@@ -1223,11 +1309,11 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
     lastTotalSent = currSent;
     lastTotalBytes = currBytes;
 
-    double pps = (double)diffSent * 1000.0 / elapsedMs;
-    double currentBytesPerSec = (double)diffBytes * 1000.0 / elapsedMs;
+    double pps = (double)diffSent * UIConfig::MILLISECONDS_PER_SECOND / elapsedMs;
+    double currentBytesPerSec = (double)diffBytes * UIConfig::MILLISECONDS_PER_SECOND / elapsedMs;
 
-    // 3. 更新 UI
-    m_dashboard.updateUI(currSent, currBytes, pps, currentBytesPerSec);
+    // 3. 更新统计显示
+    updateStatsDisplay(currSent, currBytes);
 
     // 4. 更新图表 (自适应逻辑)
     m_chartTimeX++;
@@ -1249,7 +1335,7 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
 
     // --- Bandwidth 图表 ---
     m_rawByteHistory.append(currentBytesPerSec);
-    if (m_rawByteHistory.size() > 60) m_rawByteHistory.removeFirst();
+    if (m_rawByteHistory.size() > UIConfig::CHART_TIME_RANGE) m_rawByteHistory.removeFirst();
 
     double winMaxBps = 0;
     for (double v : m_rawByteHistory)
@@ -1257,15 +1343,18 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
 
     QString unitStr = "B/s";
     double divisor = 1.0;
-    if (winMaxBps >= 1024.0 * 1024.0 * 1024.0) {
+    constexpr double GB_BYTES = 1024.0 * 1024.0 * 1024.0;
+    constexpr double MB_BYTES = 1024.0 * 1024.0;
+    constexpr double KB_BYTES = 1024.0;
+    if (winMaxBps >= GB_BYTES) {
         unitStr = "GB/s";
-        divisor = 1024.0 * 1024.0 * 1024.0;
-    } else if (winMaxBps >= 1024.0 * 1024.0) {
+        divisor = GB_BYTES;
+    } else if (winMaxBps >= MB_BYTES) {
         unitStr = "MB/s";
-        divisor = 1024.0 * 1024.0;
-    } else if (winMaxBps >= 1024.0) {
+        divisor = MB_BYTES;
+    } else if (winMaxBps >= KB_BYTES) {
         unitStr = "KB/s";
-        divisor = 1024.0;
+        divisor = KB_BYTES;
     }
 
     QList<QPointF> points;
@@ -1279,15 +1368,15 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
     axisY_BW->setTitleText(unitStr);
 
     double scaledMax = winMaxBps / divisor;
-    if (scaledMax < 10.0) scaledMax = 10.0;
+    if (scaledMax < UIConfig::CHART_MIN_SCALE_VALUE) scaledMax = UIConfig::CHART_MIN_SCALE_VALUE;
     axisY_BW->setRange(0, scaledMax * 1.2);
 
-    if (m_chartTimeX > 60) {
-        axisX_PPS->setRange(m_chartTimeX - 60, m_chartTimeX);
-        axisX_BW->setRange(m_chartTimeX - 60, m_chartTimeX);
+    if (m_chartTimeX > UIConfig::CHART_TIME_RANGE) {
+        axisX_PPS->setRange(m_chartTimeX - UIConfig::CHART_TIME_RANGE, m_chartTimeX);
+        axisX_BW->setRange(m_chartTimeX - UIConfig::CHART_TIME_RANGE, m_chartTimeX);
     } else {
-        axisX_PPS->setRange(0, 60);
-        axisX_BW->setRange(0, 60);
+        axisX_PPS->setRange(0, UIConfig::CHART_TIME_RANGE);
+        axisX_BW->setRange(0, UIConfig::CHART_TIME_RANGE);
     }
 }
 // ============================================================================
@@ -1307,8 +1396,10 @@ void MainWindow::loadConfig() {
         if (settings.contains("window/splitter_bottom_state")) {
             splitterBot->restoreState(settings.value("window/splitter_bottom_state").toByteArray());
         } else {
-            // 默认比例 15% : 55% : 30%
-            splitterBot->setSizes(QList<int>() << 150 << 550 << 300);
+            // 默认比例：日志 : 表格 : Hex
+            splitterBot->setSizes(QList<int>()
+                                  << UIConfig::SPLITTER_BOTTOM_LOG_WIDTH << UIConfig::SPLITTER_BOTTOM_TABLE_WIDTH
+                                  << UIConfig::SPLITTER_BOTTOM_HEX_WIDTH);
         }
     }
 
@@ -1317,8 +1408,9 @@ void MainWindow::loadConfig() {
         if (settings.contains("window/splitter_main_vert_state")) {
             ui->splitterMainVertical->restoreState(settings.value("window/splitter_main_vert_state").toByteArray());
         } else {
-            // 默认高度比例：Top(500px) : Bottom(200px)
-            ui->splitterMainVertical->setSizes(QList<int>() << 500 << 200);
+            // 默认高度比例：Top : Bottom
+            ui->splitterMainVertical->setSizes(QList<int>() << UIConfig::SPLITTER_MAIN_TOP_HEIGHT
+                                                            << UIConfig::SPLITTER_MAIN_BOTTOM_HEIGHT);
         }
     }
 
@@ -1353,7 +1445,29 @@ void MainWindow::loadConfig() {
 
     // 加载地址信息
     ui->editSrcMac->setText(settings.value("config/src_mac", "").toString());
-    ui->editDstMac->setText(settings.value("config/dst_mac", "").toString());
+    // dst_mac 的恢复逻辑：
+    // 1. 优先使用 config/dst_mac（最后一次关闭时的值）
+    // 2. 如果为空，则使用历史记录的第一个
+    // 3. 如果都没有，使用默认值
+    QString lastMac = settings.value("config/dst_mac", "").toString();
+    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+
+    if (macCombo) {
+        // editDstMac 现在是 QComboBox
+        if (!lastMac.isEmpty()) {
+            // 如果 config/dst_mac 有值，使用它（这是最后一次关闭时的值）
+            macCombo->setEditText(lastMac);
+        } else {
+            // 如果 config/dst_mac 为空，尝试从历史记录获取
+            QStringList macHistory = settings.value("history/dst_mac").toStringList();
+            if (!macHistory.isEmpty()) {
+                macCombo->setEditText(macHistory.first());
+            } else {
+                // 如果历史记录也为空，使用默认值
+                macCombo->setEditText("FF:FF:FF:FF:FF:FF");
+            }
+        }
+    }
     ui->editSrcIp->setText(settings.value("config/src_ip", "").toString());
     QString currentDstIp = settings.value("config/dst_ip_val", "").toString();
     if (!currentDstIp.isEmpty()) ui->editDstIp->setEditText(currentDstIp);
@@ -1403,7 +1517,7 @@ void MainWindow::loadConfig() {
     ui->spinPktLen->setValue(settings.value("config/payload_len", 64).toInt());
     ui->spinFixVal->setValue(settings.value("config/fixed_val", 0).toInt());
     ui->editCustomData->setText(settings.value("config/custom_data", "").toString());
-    ui->spinInterval->setValue(settings.value("config/interval", 10000).toInt());
+    ui->spinInterval->setValue(settings.value("config/interval", UIConfig::DEFAULT_INTERVAL_US).toInt());
     ui->spinSrcPort->setValue(settings.value("config/src_port", 10086).toInt());
     ui->spinDstPort->setValue(settings.value("config/dst_port", 10086).toInt());
     ui->editDomain->setText(settings.value("config/domain", "www.google.com").toString());
@@ -1439,7 +1553,7 @@ void MainWindow::loadConfig() {
     ui->spinSockLen->setValue(settings.value("sock_config/payload_len", 60000).toInt());
 
     // Interval
-    ui->spinSockInt->setValue(settings.value("sock_config/interval", 1000).toInt());
+    ui->spinSockInt->setValue(settings.value("sock_config/interval", UIConfig::DEFAULT_SOCKET_INTERVAL_US).toInt());
 }
 
 // ============================================================================
@@ -1470,7 +1584,10 @@ void MainWindow::saveConfig() {
     settings.setValue("config/interface_name", ui->comboInterfaceTx->currentData().toString());
     settings.setValue("config/interface_index", ui->comboInterfaceTx->currentIndex());
     settings.setValue("config/src_mac", ui->editSrcMac->text());
-    settings.setValue("config/dst_mac", ui->editDstMac->text());
+    // dst_mac 的当前值在 saveMacHistory() 中保存，这里也保存一份作为最后一次的值
+    // editDstMac 现在是 QComboBox，使用 currentText()
+    QString dstMac = qobject_cast<QComboBox*>(ui->editDstMac)->currentText();
+    settings.setValue("config/dst_mac", dstMac);
     settings.setValue("config/src_ip", ui->editSrcIp->text());
     settings.setValue("config/dst_ip_val", ui->editDstIp->currentText());
 
@@ -1553,8 +1670,8 @@ void MainWindow::saveHistory(const QString& ip) {
     // 2. 插入：将当前 IP 插入到最前面 (最近使用的排第一)
     history.insert(0, ip);
 
-    // 3. 限制：只保留最近 10 条
-    while (history.size() > 10) {
+    // 3. 限制：只保留最近 N 条
+    while (history.size() > UIConfig::MAX_HISTORY_ITEMS) {
         history.removeLast();
     }
 
@@ -1570,6 +1687,68 @@ void MainWindow::saveHistory(const QString& ip) {
 }
 
 // ============================================================================
+// 加载 MAC 历史记录 (启动时调用)
+// ============================================================================
+void MainWindow::loadMacHistory() {
+    QSettings settings("PacketStorm", "SenderConfig");
+
+    // 读取保存的 MAC 历史列表
+    QStringList history = settings.value("history/dst_mac").toStringList();
+
+    // editDstMac 现在是 QComboBox，填充历史记录下拉列表
+    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+    if (macCombo) {
+        macCombo->clear();
+        if (!history.isEmpty()) {
+            macCombo->addItems(history);
+            // 不在这里设置当前值，让 loadConfig() 来设置（优先使用 config/dst_mac）
+        }
+        // 如果历史记录为空，保持为空，让 loadConfig() 设置默认值
+    }
+}
+
+// ============================================================================
+// 保存 MAC 历史记录 (点击发送时调用)
+// ============================================================================
+void MainWindow::saveMacHistory(const QString& mac) {
+    if (mac.isEmpty()) return;
+
+    // 验证 MAC 地址格式
+    QRegularExpression macRegex("^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$");
+    if (!macRegex.match(mac).hasMatch()) {
+        return; // 格式不正确，不保存
+    }
+
+    QSettings settings("PacketStorm", "SenderConfig");
+    QStringList history = settings.value("history/dst_mac").toStringList();
+
+    // 1. 去重：移除已存在的相同项，并移除空项
+    history.removeAll(mac);
+    history.removeAll("");
+
+    // 2. 插入：将当前 MAC 插入到最前面 (最近使用的排第一)
+    history.insert(0, mac);
+
+    // 3. 限制：只保留最近 N 条
+    while (history.size() > UIConfig::MAX_HISTORY_ITEMS) {
+        history.removeLast();
+    }
+
+    // 4. 保存回磁盘
+    settings.setValue("history/dst_mac", history);
+
+    // 5. 如果是 QComboBox，刷新下拉列表
+    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+    if (macCombo) {
+        macCombo->blockSignals(true);
+        macCombo->clear();
+        macCombo->addItems(history);
+        macCombo->setEditText(mac); // 恢复当前显示的文本
+        macCombo->blockSignals(false);
+    }
+}
+
+// ============================================================================
 // [修复] 日志功能恢复
 // 左侧：txtLog (文本日志)
 // 中间：tablePackets (数据包列表)
@@ -1579,9 +1758,14 @@ void MainWindow::appendLog(const QString& msg, int level) {
     // 1. 打印到 IDE 控制台
     qDebug() << "[SYSTEM]" << msg;
 
-    // 2. 状态栏反馈
+    // 2. 状态栏反馈（仅在日志消息时临时显示，tooltip会覆盖它）
+    // 注意：现在状态栏主要用于显示鼠标所在位置控件的tooltip
+    // 日志消息只在没有tooltip时显示3秒
     if (this->statusBar()) {
-        this->statusBar()->showMessage(msg, 3000);
+        // 如果当前没有tooltip显示，则显示日志消息
+        if (this->statusBar()->currentMessage().isEmpty()) {
+            this->statusBar()->showMessage(msg, 3000);
+        }
     }
 
     // 3. [核心] 写入左侧的 txtLog 文本框
@@ -1741,6 +1925,51 @@ void MainWindow::updateHexTable(const QByteArray& data) {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    // [新增] 拦截ToolTip事件，阻止默认弹窗显示，但保留状态栏显示
+    if (event->type() == QEvent::ToolTip) {
+        QWidget* widget = qobject_cast<QWidget*>(watched);
+        if (widget && statusBar()) {
+            QString tooltip = widget->toolTip();
+            if (!tooltip.isEmpty()) {
+                statusBar()->showMessage(tooltip);
+            } else {
+                // 如果没有tooltip，尝试显示对象名称
+                QString objName = widget->objectName();
+                if (!objName.isEmpty()) {
+                    statusBar()->showMessage(objName);
+                } else {
+                    statusBar()->clearMessage();
+                }
+            }
+        }
+        return true; // 阻止默认的tooltip弹窗
+    }
+
+    // 状态栏显示鼠标所在位置控件的tooltip（Enter事件）
+    if (event->type() == QEvent::Enter) {
+        QWidget* widget = qobject_cast<QWidget*>(watched);
+        if (widget && statusBar()) {
+            QString tooltip = widget->toolTip();
+            if (!tooltip.isEmpty()) {
+                statusBar()->showMessage(tooltip);
+            } else {
+                // 如果没有tooltip，尝试显示对象名称
+                QString objName = widget->objectName();
+                if (!objName.isEmpty()) {
+                    statusBar()->showMessage(objName);
+                } else {
+                    statusBar()->clearMessage();
+                }
+            }
+        }
+    } else if (event->type() == QEvent::Leave) {
+        // 鼠标离开时清除状态栏消息（但保留Hex表格的处理）
+        if (watched != ui->tableHex->viewport() && statusBar()) {
+            statusBar()->clearMessage();
+        }
+    }
+
+    // Hex 表格鼠标悬停高亮
     if (watched == ui->tableHex->viewport()) {
         if (event->type() == QEvent::MouseMove) {
             QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
@@ -1801,4 +2030,428 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         }
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+// ============================================================================
+// [新增] 设置系统资源监控
+// ============================================================================
+void MainWindow::setupResourceMonitor() {
+    // 创建资源监控对象
+    m_resourceMonitor = new SystemResourceMonitor(this);
+
+    // 创建容器
+    m_resourceContainer = new QWidget();
+    m_resourceContainer->setStyleSheet("background: transparent;");
+    QHBoxLayout* resourceLayout = new QHBoxLayout(m_resourceContainer);
+    resourceLayout->setContentsMargins(10, 5, 10, 5);
+    resourceLayout->setSpacing(20);
+    resourceLayout->addStretch();
+
+    // 创建 CPU 监控组件
+    m_cpuWidget = new CircularProgressWidget(m_resourceContainer);
+    m_cpuWidget->setLabel("CPU");
+    m_cpuWidget->setUnit("%");
+    m_cpuWidget->setColor(QColor("#00e676")); // 绿色
+    resourceLayout->addWidget(m_cpuWidget);
+
+    // 创建内存监控组件
+    m_memoryWidget = new CircularProgressWidget(m_resourceContainer);
+    m_memoryWidget->setLabel("Memory");
+    m_memoryWidget->setUnit("%");
+    m_memoryWidget->setColor(QColor("#d500f9")); // 紫色
+    resourceLayout->addWidget(m_memoryWidget);
+
+    // 创建上传速率监控组件
+    // 注意：显示的是整个网卡的总上传流量（包括本应用、其他应用、系统流量等）
+    m_uploadWidget = new CircularProgressWidget(m_resourceContainer);
+    m_uploadWidget->setLabel("Upload");
+    m_uploadWidget->setUnit("MB/s");
+    m_uploadWidget->setColor(QColor("#ff6d00")); // 橙色
+    m_uploadWidget->setToolTip("网卡总上传流量（包括本应用、其他应用和系统流量）");
+    resourceLayout->addWidget(m_uploadWidget);
+
+    // 创建下载速率监控组件
+    // 注意：显示的是整个网卡的总下载流量（包括 ICMP 响应、其他应用流量等）
+    m_downloadWidget = new CircularProgressWidget(m_resourceContainer);
+    m_downloadWidget->setLabel("Download");
+    m_downloadWidget->setUnit("MB/s");
+    m_downloadWidget->setColor(QColor("#00bcd4")); // 青色
+    m_downloadWidget->setToolTip("网卡总下载流量（包括 ICMP 响应、其他应用和系统流量）");
+    resourceLayout->addWidget(m_downloadWidget);
+
+    // 创建已发送统计显示容器（上下排列：包数量在上，字节在下）
+    QWidget* statsContainer = new QWidget(m_resourceContainer);
+    statsContainer->setStyleSheet("background: transparent;");
+    QVBoxLayout* statsLayout = new QVBoxLayout(statsContainer);
+    statsLayout->setContentsMargins(10, 5, 10, 5);
+    statsLayout->setSpacing(8);
+
+    // 标题
+    QLabel* statsTitle = new QLabel("Sent", statsContainer);
+    statsTitle->setStyleSheet("color: #718096; font-size: 10px; font-weight: bold;");
+    statsTitle->setAlignment(Qt::AlignCenter);
+    statsLayout->addWidget(statsTitle);
+
+    // 已发送包数量（上面，显示原始值，不缩写，带单位）
+    m_packetsLabel = new QLabel("0 packets", statsContainer);
+    m_packetsLabel->setStyleSheet("color: #00e676; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono';");
+    m_packetsLabel->setAlignment(Qt::AlignCenter);
+    m_packetsLabel->setToolTip("本应用程序已发送的数据包总数");
+    m_packetsLabel->setWordWrap(false);
+    statsLayout->addWidget(m_packetsLabel);
+
+    // 已发送字节（下面）
+    m_bytesLabel = new QLabel("0 B", statsContainer);
+    m_bytesLabel->setStyleSheet("color: #00f0ff; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono';");
+    m_bytesLabel->setAlignment(Qt::AlignCenter);
+    m_bytesLabel->setToolTip("本应用程序已发送的字节总数");
+    m_bytesLabel->setWordWrap(false);
+    statsLayout->addWidget(m_bytesLabel);
+
+    // 设置固定宽度，确保文字不会被截断
+    statsContainer->setMinimumWidth(120);
+    statsContainer->setMaximumWidth(150);
+    resourceLayout->addWidget(statsContainer);
+
+    resourceLayout->addStretch();
+
+    // 连接信号
+    connect(m_resourceMonitor, &SystemResourceMonitor::resourceUpdated, this, &MainWindow::updateResourceDisplay,
+            Qt::QueuedConnection);
+    connect(m_resourceMonitor, &SystemResourceMonitor::networkStatsUpdated, this, &MainWindow::updateNetworkDisplay,
+            Qt::QueuedConnection);
+    connect(m_resourceMonitor, &SystemResourceMonitor::logMessage, this, &MainWindow::appendLog, Qt::QueuedConnection);
+}
+
+// ============================================================================
+// [新增] 递归为所有子控件安装事件过滤器
+// ============================================================================
+void MainWindow::installEventFilterRecursive(QWidget* widget) {
+    if (widget) {
+        widget->installEventFilter(this);
+        for (QObject* child : widget->children()) {
+            QWidget* childWidget = qobject_cast<QWidget*>(child);
+            if (childWidget) {
+                installEventFilterRecursive(childWidget);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// [新增] 为所有控件设置tooltip
+// ============================================================================
+void MainWindow::setupTooltips() {
+    // 网卡选择
+    if (ui->comboInterfaceTx) {
+        ui->comboInterfaceTx->setToolTip("选择用于发送数据包的网络接口（网卡）");
+    }
+
+    // 地址协议组
+    if (ui->editSrcMac) {
+        ui->editSrcMac->setToolTip("源MAC地址（发送方MAC地址），格式：AA:BB:CC:DD:EE:FF");
+    }
+    if (ui->editDstMac) {
+        QComboBox* dstMacCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+        if (dstMacCombo) {
+            dstMacCombo->setToolTip("目标MAC地址（接收方MAC地址），格式：AA:BB:CC:DD:EE:FF\n"
+                                    "FF:FF:FF:FF:FF:FF 表示广播地址");
+        }
+    }
+    if (ui->btnGetMac) {
+        ui->btnGetMac->setToolTip("通过ARP协议自动解析目标IP对应的MAC地址");
+    }
+    if (ui->editSrcIp) {
+        ui->editSrcIp->setToolTip("源IP地址（发送方IP地址），格式：192.168.1.1");
+    }
+    if (ui->editDstIp) {
+        QComboBox* dstIpCombo = qobject_cast<QComboBox*>(ui->editDstIp);
+        if (dstIpCombo) {
+            dstIpCombo->setToolTip("目标IP地址（接收方IP地址），格式：192.168.1.1\n"
+                                   "支持历史记录，点击下拉箭头查看");
+        }
+    }
+
+    // 协议选择
+    if (ui->rbIcmp) {
+        ui->rbIcmp->setToolTip("Internet控制消息协议（ICMP）\n"
+                               "用于ping、traceroute等网络诊断工具");
+    }
+    if (ui->rbUdp) {
+        ui->rbUdp->setToolTip("用户数据报协议（UDP）\n"
+                              "无连接、不可靠的传输协议，适用于实时应用");
+    }
+    if (ui->rbTcp) {
+        ui->rbTcp->setToolTip("传输控制协议（TCP）\n"
+                              "面向连接、可靠的传输协议，需要设置TCP标志");
+    }
+    if (ui->rbDns) {
+        ui->rbDns->setToolTip("域名系统协议（DNS）\n"
+                              "用于域名解析查询");
+    }
+    if (ui->rbArp) {
+        ui->rbArp->setToolTip("地址解析协议（ARP）\n"
+                              "用于将IP地址解析为MAC地址");
+    }
+
+    // TCP标志
+    if (ui->chkSyn) {
+        ui->chkSyn->setToolTip("SYN标志：同步序列号，用于建立TCP连接");
+    }
+    if (ui->chkAck) {
+        ui->chkAck->setToolTip("ACK标志：确认标志，表示确认号有效");
+    }
+    if (ui->chkPsh) {
+        ui->chkPsh->setToolTip("PSH标志：推送标志，要求立即将数据推送给应用层");
+    }
+    if (ui->chkFin) {
+        ui->chkFin->setToolTip("FIN标志：结束标志，用于关闭TCP连接");
+    }
+    if (ui->chkRst) {
+        ui->chkRst->setToolTip("RST标志：重置标志，用于重置异常连接");
+    }
+
+    // DNS域名
+    if (ui->editDomain) {
+        ui->editDomain->setToolTip("DNS查询的域名（仅在DNS协议模式下有效）\n"
+                                   "例如：www.google.com");
+    }
+
+    // 载荷选项
+    if (ui->rbPayRandom) {
+        ui->rbPayRandom->setToolTip("随机载荷：数据包载荷使用随机字节填充");
+    }
+    if (ui->rbPayFixed) {
+        ui->rbPayFixed->setToolTip("固定字节载荷：数据包载荷使用指定的固定字节值填充");
+    }
+    if (ui->rbPayCustom) {
+        ui->rbPayCustom->setToolTip("自定义载荷：数据包载荷使用自定义文本内容");
+    }
+    if (ui->spinPktLen) {
+        ui->spinPktLen->setToolTip("数据包载荷长度（字节）\n"
+                                   "范围：1-65500字节\n"
+                                   "注意：实际数据包大小 = 以太网头(14) + IP头(20) + 协议头 + 载荷长度");
+    }
+    if (ui->spinFixVal) {
+        ui->spinFixVal->setToolTip("固定字节值（十六进制）\n"
+                                   "仅在固定字节载荷模式下有效\n"
+                                   "范围：0x00-0xFF");
+    }
+    if (ui->editCustomData) {
+        ui->editCustomData->setToolTip("自定义载荷内容（文本）\n"
+                                       "仅在自定义载荷模式下有效\n"
+                                       "输入的内容将作为数据包的载荷部分");
+    }
+
+    // 发送参数
+    if (ui->spinInterval) {
+        ui->spinInterval->setToolTip("发送间隔（微秒，µs）\n"
+                                     "1000 µs = 1 ms\n"
+                                     "10000 µs = 10 ms\n"
+                                     "设置为 0 表示全速发送（无延迟）");
+    }
+    if (lblTargetPPS) {
+        lblTargetPPS->setToolTip("根据发送间隔计算的目标发送速率（包/秒）\n"
+                                 "计算公式：1,000,000 / 间隔(µs) = 包/秒");
+    }
+    if (ui->spinSrcPort) {
+        ui->spinSrcPort->setToolTip("源端口号（仅在UDP/TCP协议模式下有效）\n"
+                                    "范围：0-65535");
+    }
+    if (ui->spinDstPort) {
+        ui->spinDstPort->setToolTip("目标端口号（仅在UDP/TCP协议模式下有效）\n"
+                                    "范围：0-65535");
+    }
+
+    // 按钮
+    if (ui->btnStartSend) {
+        ui->btnStartSend->setToolTip("开始发送数据包\n"
+                                     "点击后将根据当前配置开始发送数据包");
+    }
+    if (ui->btnStopSend) {
+        ui->btnStopSend->setToolTip("停止发送数据包\n"
+                                    "点击后将停止当前的数据包发送任务");
+    }
+
+    // Socket发送模块
+    if (ui->comboSockSrc) {
+        ui->comboSockSrc->setToolTip("选择源网络接口（用于Socket发送）\n"
+                                     "系统会自动查找该接口的IP地址");
+    }
+    if (ui->editSockIp) {
+        ui->editSockIp->setToolTip("目标IP地址（Socket发送模式）\n"
+                                   "格式：192.168.1.1");
+    }
+    if (ui->spinSockPort) {
+        ui->spinSockPort->setToolTip("目标端口号（Socket发送模式）\n"
+                                     "范围：0-65535");
+    }
+    if (ui->rbSockUdp) {
+        ui->rbSockUdp->setToolTip("使用UDP协议发送（Socket模式）\n"
+                                  "无连接、不可靠的传输");
+    }
+    if (ui->rbSockTcp) {
+        ui->rbSockTcp->setToolTip("使用TCP协议发送（Socket模式）\n"
+                                  "面向连接、可靠的传输");
+    }
+    if (ui->spinSockLen) {
+        ui->spinSockLen->setToolTip("Socket发送的载荷大小（字节）\n"
+                                    "范围：1-65507字节（UDP最大载荷）");
+    }
+    if (ui->spinSockInt) {
+        ui->spinSockInt->setToolTip("Socket发送间隔（微秒，µs）\n"
+                                    "控制Socket模式下的发送速率");
+    }
+    if (ui->btnSockStart) {
+        ui->btnSockStart->setToolTip("开始Socket发送\n"
+                                     "使用操作系统网络栈发送数据包");
+    }
+    if (ui->btnSockStop) {
+        ui->btnSockStop->setToolTip("停止Socket发送");
+    }
+
+    // 图表和监控
+    if (ui->grpChart) {
+        ui->grpChart->setToolTip("流量监控图表\n"
+                                 "显示实时发送速率（PPS）和带宽（MB/s）趋势");
+    }
+
+    // 数据包表格
+    if (ui->tablePackets) {
+        ui->tablePackets->setToolTip("已发送数据包列表\n"
+                                     "显示每批发送的最后一个数据包的详细信息\n"
+                                     "点击行可查看数据包的十六进制内容");
+    }
+
+    // Hex视图
+    if (ui->tableHex) {
+        ui->tableHex->setToolTip("数据包十六进制视图\n"
+                                 "显示选中数据包的完整十六进制内容\n"
+                                 "左侧：偏移量，中间：十六进制，右侧：ASCII字符");
+    }
+
+    // 日志窗口
+    if (ui->txtLog) {
+        ui->txtLog->setToolTip("系统日志窗口\n"
+                               "显示系统运行状态、错误信息和调试信息");
+    }
+
+    // 自动滚动
+    if (ui->chkAutoScroll) {
+        ui->chkAutoScroll->setToolTip("自动滚动到最新数据包\n"
+                                      "启用后，新数据包会自动滚动到底部并显示");
+    }
+
+    // GroupBox工具提示
+    if (ui->grpSender) {
+        ui->grpSender->setToolTip("WinPcap原始数据包发送模块\n"
+                                  "使用WinPcap/Npcap库直接构造和发送数据包");
+    }
+    if (ui->grpAddr) {
+        ui->grpAddr->setToolTip("地址和协议配置\n"
+                                "配置源/目标MAC地址和IP地址");
+    }
+    if (ui->grpParam) {
+        ui->grpParam->setToolTip("协议参数配置\n"
+                                 "选择协议类型和设置协议相关参数");
+    }
+    if (ui->grpPayload) {
+        ui->grpPayload->setToolTip("数据包载荷配置\n"
+                                   "设置数据包载荷的模式和内容");
+    }
+    if (ui->grpSocketSender) {
+        ui->grpSocketSender->setToolTip("操作系统网络栈发送模块\n"
+                                        "使用操作系统Socket API发送数据包\n"
+                                        "支持自动分片，适用于大包发送");
+    }
+    if (ui->grpSockProto) {
+        ui->grpSockProto->setToolTip("Socket协议选择\n"
+                                     "选择UDP或TCP协议");
+    }
+}
+
+// ============================================================================
+// [新增] 更新资源显示
+// ============================================================================
+void MainWindow::updateResourceDisplay(double cpuUsage, double memoryUsage) {
+    if (m_cpuWidget) {
+        m_cpuWidget->setValue(cpuUsage);
+    }
+    if (m_memoryWidget) {
+        m_memoryWidget->setValue(memoryUsage);
+    }
+}
+
+// ============================================================================
+// [新增] 更新网卡流量显示
+// ============================================================================
+void MainWindow::updateNetworkDisplay(double uploadSpeed, double downloadSpeed) {
+    // 自适应单位显示：根据速度值自动选择 KB/s 或 MB/s
+    // 注意：这里显示的是整个网卡的总流量（包括本应用、其他应用、系统流量、ICMP 响应等）
+    // 与右下角状态栏的"Speed"不同，状态栏只统计本应用程序发送的数据包
+    auto formatSpeed = [](double speedMBps) -> QPair<double, QString> {
+        if (speedMBps < 0.001) {
+            // 小于 0.001 MB/s，显示为 0.0 KB/s
+            return QPair<double, QString>(0.0, "KB/s");
+        } else if (speedMBps < 1.0) {
+            // 小于 1 MB/s，转换为 KB/s 显示
+            double speedKBps = speedMBps * 1024.0;
+            return QPair<double, QString>(speedKBps, "KB/s");
+        } else if (speedMBps < 1024.0) {
+            // 1 MB/s 到 1024 MB/s，显示 MB/s
+            return QPair<double, QString>(speedMBps, "MB/s");
+        } else {
+            // 大于等于 1024 MB/s，转换为 GB/s 显示
+            double speedGBps = speedMBps / 1024.0;
+            return QPair<double, QString>(speedGBps, "GB/s");
+        }
+    };
+
+    if (m_uploadWidget) {
+        QPair<double, QString> result = formatSpeed(uploadSpeed);
+        m_uploadWidget->setUnit(result.second);
+        m_uploadWidget->setValue(result.first);
+    }
+    if (m_downloadWidget) {
+        QPair<double, QString> result = formatSpeed(downloadSpeed);
+        m_downloadWidget->setUnit(result.second);
+        m_downloadWidget->setValue(result.first);
+    }
+}
+
+// ============================================================================
+// [新增] 更新统计数据显示（已发包数量和已发送字节）
+// ============================================================================
+void MainWindow::updateStatsDisplay(uint64_t sent, uint64_t bytes) {
+    // 格式化已发包数量（显示原始值，不缩写，带单位）
+    if (m_packetsLabel) {
+        QLocale loc(QLocale::English);
+        // 直接显示完整数字，带千位分隔符，后面加单位
+        QString packetsText = loc.toString((qulonglong)sent) + " packets";
+        m_packetsLabel->setText(packetsText);
+    }
+
+    // 格式化已发送字节
+    if (m_bytesLabel) {
+        QString bytesText;
+        double dBytes = (double)bytes;
+        if (dBytes >= 1024.0 * 1024.0 * 1024.0) {
+            // 大于等于1GB，显示为X.XX GB
+            double bytesGB = dBytes / (1024.0 * 1024.0 * 1024.0);
+            bytesText = QString::number(bytesGB, 'f', 2) + " GB";
+        } else if (dBytes >= 1024.0 * 1024.0) {
+            // 大于等于1MB，显示为X.XX MB
+            double bytesMB = dBytes / (1024.0 * 1024.0);
+            bytesText = QString::number(bytesMB, 'f', 2) + " MB";
+        } else if (dBytes >= 1024.0) {
+            // 大于等于1KB，显示为X.XX KB
+            double bytesKB = dBytes / 1024.0;
+            bytesText = QString::number(bytesKB, 'f', 2) + " KB";
+        } else {
+            // 小于1KB，显示为字节数（带千位分隔符）
+            QLocale loc(QLocale::English);
+            bytesText = loc.toString((qulonglong)bytes) + " B";
+        }
+        m_bytesLabel->setText(bytesText);
+    }
 }

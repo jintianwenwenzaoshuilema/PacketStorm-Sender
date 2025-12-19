@@ -3,6 +3,36 @@
 
 #include <atomic>
 
+// ============================================================================
+// [优化] 常量定义 - 消除魔法数字
+// ============================================================================
+namespace PacketConfig {
+// 网络协议常量
+constexpr unsigned int MAX_UDP_LENGTH = 65535;         // UDP 最大长度
+constexpr unsigned int MIN_ETHERNET_FRAME = 60;        // 以太网最小帧长度（字节）
+constexpr unsigned int MAX_PACKET_BUFFER_SIZE = 10000; // 数据包缓冲区最大大小（字节）
+
+// 批量发送配置
+constexpr unsigned int BURST_BATCH_SIZE = 2048;           // 突发模式批量包数量
+constexpr unsigned int MAX_BATCH_SIZE = 5000;             // 正常模式最大批量包数量
+constexpr unsigned int QUEUE_MEMORY_OVERHEAD = 1000;      // 队列内存额外空间（字节）
+constexpr unsigned int NORMAL_MODE_QUEUE_ESTIMATE = 2000; // 正常模式队列估算大小（字节）
+
+// 时间配置（微秒）
+constexpr unsigned int TARGET_BATCH_TIME_US = 1000000; // 目标批量时间（1秒）
+constexpr unsigned int MIN_SLEEP_THRESHOLD_US = 1000;  // 最小睡眠阈值（微秒）
+
+// 统计更新间隔（毫秒）
+constexpr unsigned int STATS_UPDATE_INTERVAL_MS = 200;       // 原始包模式统计更新间隔
+constexpr unsigned int SOCKET_STATS_UPDATE_INTERVAL_MS = 30; // Socket模式统计更新间隔
+
+// TCP 连接配置
+constexpr int TCP_CONNECT_MAX_RETRIES = 30; // TCP连接最大重试次数
+
+// PCAP 配置
+constexpr int PCAP_SNAPLEN = 65535; // PCAP 抓包长度
+} // namespace PacketConfig
+
 #ifdef __cplusplus
 extern std::atomic<bool> g_is_sending;
 extern std::atomic<uint64_t> g_total_sent;
@@ -17,14 +47,13 @@ typedef void (*StatsCallback)(uint64_t total_sent, uint64_t total_bytes);
 // [新增] Hex 数据回调定义
 typedef void (*HexCallback)(const unsigned char* data, int len);
 
+// [新增] 错误回调定义
+typedef void (*ErrorCallback)(const char* error_msg);
+
 extern "C" {
 #endif
 
-enum PayloadMode {
-    PAYLOAD_RANDOM = 0,
-    PAYLOAD_FIXED = 1,
-    PAYLOAD_CUSTOM = 2
-};
+enum PayloadMode { PAYLOAD_RANDOM = 0, PAYLOAD_FIXED = 1, PAYLOAD_CUSTOM = 2 };
 
 #define UDP_PACKAGE 1
 #define TCP_PACKAGE 2
@@ -57,6 +86,9 @@ struct SenderConfig {
 
     // [新增] Hex 数据回调指针
     HexCallback hex_callback;
+
+    // [新增] 错误回调指针
+    ErrorCallback error_callback;
 };
 
 typedef void (*LogCallback)(const char* msg, int level);

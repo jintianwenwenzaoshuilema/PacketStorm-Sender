@@ -2,9 +2,11 @@
 #include <chrono>
 #include <iostream>
 #include <pcap.h>
+#include <random>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <thread>
 #include <vector>
 #include <ws2tcpip.h>
@@ -24,6 +26,31 @@ using namespace std;
 std::atomic<bool> g_is_sending{false};
 std::atomic<uint64_t> g_total_sent{0};
 std::atomic<uint64_t> g_total_bytes{0};
+
+// === [优化] 线程局部随机数生成器 ===
+// 使用线程局部存储，每个线程有独立的随机数生成器，避免竞争
+thread_local std::mt19937* g_rng = nullptr;
+thread_local std::uniform_int_distribution<unsigned int>* g_byte_dist = nullptr;
+
+static void init_random_generator() {
+    if (!g_rng) {
+        std::random_device rd;
+        g_rng = new std::mt19937(rd());
+        // uniform_int_distribution 不支持 unsigned char，使用 unsigned int 然后转换
+        g_byte_dist = new std::uniform_int_distribution<unsigned int>(0, 255);
+    }
+}
+
+static unsigned char get_random_byte() {
+    init_random_generator();
+    return static_cast<unsigned char>((*g_byte_dist)(*g_rng));
+}
+
+static unsigned short get_random_ushort() {
+    init_random_generator();
+    std::uniform_int_distribution<unsigned int> dist(0, PacketConfig::MAX_UDP_LENGTH);
+    return static_cast<unsigned short>(dist(*g_rng));
+}
 
 // === Socket Specific Variables ===
 std::atomic<bool> g_is_sock_sending{false};
@@ -56,7 +83,8 @@ static void fill_payload_data(unsigned char* data_ptr, int target_len, const Sen
             break;
         case PAYLOAD_RANDOM:
         default:
-            for (int i = 0; i < target_len; ++i) data_ptr[i] = (unsigned char)(rand() % 256);
+            // [优化] 使用 C++11 随机数生成器替代 rand()
+            for (int i = 0; i < target_len; ++i) data_ptr[i] = get_random_byte();
             break;
     }
 }
@@ -268,13 +296,24 @@ static void build_udp_header(unsigned char* package, u_short s_port, u_short d_p
     psd.proto = 0x11;
     psd.plen = htons(udp_len);
 
+    // [优化] 使用栈缓冲区替代堆分配，最大 UDP 长度 + psd_header
+    constexpr int MAX_UDP_PSEUDO_LEN = sizeof(psd_header) + PacketConfig::MAX_UDP_LENGTH;
+    if (udp_len > PacketConfig::MAX_UDP_LENGTH) return; // 安全检查
+
     int pseudo_len = sizeof(psd) + udp_len;
-    char* tmp = (char*)calloc(1, pseudo_len);
-    if (!tmp) return;
-    memcpy(tmp, &psd, sizeof(psd));
-    memcpy(tmp + sizeof(psd), uh, udp_len);
-    uh->checksum = checksum((u_short*)tmp, pseudo_len);
-    free(tmp);
+    // 对于小包使用栈缓冲区，大包使用动态分配（但这种情况很少）
+    if (pseudo_len <= MAX_UDP_PSEUDO_LEN) {
+        char tmp[MAX_UDP_PSEUDO_LEN];
+        memcpy(tmp, &psd, sizeof(psd));
+        memcpy(tmp + sizeof(psd), uh, udp_len);
+        uh->checksum = checksum((u_short*)tmp, pseudo_len);
+    } else {
+        // 极端情况：使用动态分配（理论上不会发生，因为 UDP 最大长度有限制）
+        std::vector<char> tmp(pseudo_len);
+        memcpy(tmp.data(), &psd, sizeof(psd));
+        memcpy(tmp.data() + sizeof(psd), uh, udp_len);
+        uh->checksum = checksum((u_short*)tmp.data(), pseudo_len);
+    }
 }
 
 static void build_tcp_header(unsigned char* package, u_short s_port, u_short d_port, u_int seq, u_int ack, u_char flags,
@@ -298,14 +337,25 @@ static void build_tcp_header(unsigned char* package, u_short s_port, u_short d_p
     psd.proto = 0x06;
     psd.plen = htons((u_short)tcp_total_len);
 
+    // [优化] 使用栈缓冲区替代堆分配，最大 TCP 数据长度通常不超过 1460 (MTU - IP - TCP)
+    constexpr int MAX_TCP_PSEUDO_LEN = sizeof(psd_header) + 20 + 1460;
     int pseudo_total_len = sizeof(psd) + tcp_total_len;
-    char* tmp = (char*)calloc(1, pseudo_total_len);
-    if (!tmp) return;
-    memcpy(tmp, &psd, sizeof(psd));
-    memcpy(tmp + sizeof(psd), th, 20);
-    if (tcp_payload_len > 0) memcpy(tmp + sizeof(psd) + 20, package + 14 + 20 + 20, tcp_payload_len);
-    th->checksum = checksum((u_short*)tmp, pseudo_total_len);
-    free(tmp);
+
+    if (pseudo_total_len <= MAX_TCP_PSEUDO_LEN) {
+        // 常见情况：使用栈缓冲区
+        char tmp[MAX_TCP_PSEUDO_LEN];
+        memcpy(tmp, &psd, sizeof(psd));
+        memcpy(tmp + sizeof(psd), th, 20);
+        if (tcp_payload_len > 0) memcpy(tmp + sizeof(psd) + 20, package + 14 + 20 + 20, tcp_payload_len);
+        th->checksum = checksum((u_short*)tmp, pseudo_total_len);
+    } else {
+        // 极端情况：使用动态分配（理论上很少发生）
+        std::vector<char> tmp(pseudo_total_len);
+        memcpy(tmp.data(), &psd, sizeof(psd));
+        memcpy(tmp.data() + sizeof(psd), th, 20);
+        if (tcp_payload_len > 0) memcpy(tmp.data() + sizeof(psd) + 20, package + 14 + 20 + 20, tcp_payload_len);
+        th->checksum = checksum((u_short*)tmp.data(), pseudo_total_len);
+    }
 }
 
 static void build_icmp_header(unsigned char* package, int seq_num, int payload_len, const SenderConfig* cfg) {
@@ -315,7 +365,8 @@ static void build_icmp_header(unsigned char* package, int seq_num, int payload_l
     icmph->type = 8;
     icmph->code = 0;
     icmph->checksum = 0;
-    icmph->ident = htons(0x1234);
+    // [修复] 使用随机 ident，更符合实际 ping 工具的行为
+    icmph->ident = htons(get_random_ushort());
     icmph->seq = htons((uint16_t)seq_num);
 
     unsigned char* data_ptr = (unsigned char*)(package + 14 + 20 + 8);
@@ -326,32 +377,52 @@ static void build_icmp_header(unsigned char* package, int seq_num, int payload_l
 static int dns_create_header(struct dns_header* header) {
     if (!header) return -1;
     memset(header, 0, sizeof(struct dns_header));
-    header->id = (unsigned short)(rand() % 65535);
+    // [优化] 使用 C++11 随机数生成器替代 rand()
+    header->id = get_random_ushort();
     header->flags = htons(0x0100);
     header->questions = htons(1);
     return 0;
 }
-static int dns_create_queries(struct dns_queries* question, const char* hostname) {
-    if (!question || !hostname) return -1;
+// [优化] 修改函数签名，返回 vector 而不是修改 question->name
+// 这样调用者可以管理内存生命周期
+static std::vector<char> dns_create_queries(const char* hostname, int* out_length) {
+    std::vector<char> name_buffer;
+    if (!hostname) {
+        if (out_length) *out_length = 0;
+        return name_buffer;
+    }
+
     size_t len = strlen(hostname);
-    question->name = (char*)malloc(len + 2);
-    if (!question->name) return -2;
-    question->length = (int)len + 2;
-    question->qtype = htons(1);
-    question->qclass = htons(1);
-    char* qname = question->name;
-    char* host_dup = strdup(hostname);
-    char* token = strtok(host_dup, ".");
-    while (token) {
-        size_t tlen = strlen(token);
+    name_buffer.resize(len + 2, 0);
+    char* qname = name_buffer.data();
+
+    // [优化] 使用 std::string 替代 strdup/strtok，更安全
+    std::string host_str(hostname);
+    size_t start = 0;
+    size_t pos = host_str.find('.');
+    while (pos != std::string::npos) {
+        size_t tlen = pos - start;
+        if (tlen > 0 && tlen <= 63) { // DNS 标签长度限制
+            *qname++ = (char)tlen;
+            memcpy(qname, host_str.c_str() + start, tlen);
+            qname += tlen;
+        }
+        start = pos + 1;
+        pos = host_str.find('.', start);
+    }
+    // 处理最后一个标签
+    size_t tlen = host_str.length() - start;
+    if (tlen > 0 && tlen <= 63) {
         *qname++ = (char)tlen;
-        memcpy(qname, token, tlen);
+        memcpy(qname, host_str.c_str() + start, tlen);
         qname += tlen;
-        token = strtok(NULL, ".");
     }
     *qname = 0;
-    free(host_dup);
-    return 0;
+
+    if (out_length) {
+        *out_length = (int)(qname - name_buffer.data() + 1);
+    }
+    return name_buffer;
 }
 static void build_dns(unsigned char* package, const char* domain, int dns_package_len) {
     udp_header* uh = (udp_header*)(package + 14 + 20);
@@ -364,14 +435,20 @@ static void build_dns(unsigned char* package, const char* domain, int dns_packag
 
     struct dns_header header;
     dns_create_header(&header);
-    struct dns_queries question;
-    dns_create_queries(&question, domain);
+
+    // [优化] 使用 vector 管理 DNS 查询内存，自动释放
+    int query_length = 0;
+    std::vector<char> query_buffer = dns_create_queries(domain, &query_length);
+    if (query_buffer.empty() || query_length == 0) {
+        return; // 查询创建失败
+    }
+
     char* req = (char*)(package + 14 + 20 + 8);
     memcpy(req, &header, sizeof(header));
-    memcpy(req + sizeof(header), question.name, question.length);
+    memcpy(req + sizeof(header), query_buffer.data(), query_length);
     u_short qtype = htons(1), qclass = htons(1);
-    memcpy(req + sizeof(header) + question.length, &qtype, 2);
-    memcpy(req + sizeof(header) + question.length + 2, &qclass, 2);
+    memcpy(req + sizeof(header) + query_length, &qtype, 2);
+    memcpy(req + sizeof(header) + query_length + 2, &qclass, 2);
 
     psd_header psd;
     psd.s_ip = ih->src_ip_addr;
@@ -380,15 +457,22 @@ static void build_dns(unsigned char* package, const char* domain, int dns_packag
     psd.proto = 0x11;
     psd.plen = htons((u_short)udp_len);
 
+    // [优化] 使用栈缓冲区替代堆分配
+    constexpr int MAX_DNS_PSEUDO_LEN = sizeof(psd_header) + PacketConfig::MAX_UDP_LENGTH;
     int pseudo_len = sizeof(psd) + udp_len;
-    char* tmp = (char*)calloc(1, pseudo_len);
-    if (tmp) {
+
+    if (pseudo_len <= MAX_DNS_PSEUDO_LEN) {
+        char tmp[MAX_DNS_PSEUDO_LEN];
         memcpy(tmp, &psd, sizeof(psd));
         memcpy(tmp + sizeof(psd), uh, udp_len);
         uh->checksum = checksum((u_short*)tmp, pseudo_len);
-        free(tmp);
+    } else {
+        std::vector<char> tmp(pseudo_len);
+        memcpy(tmp.data(), &psd, sizeof(psd));
+        memcpy(tmp.data() + sizeof(psd), uh, udp_len);
+        uh->checksum = checksum((u_short*)tmp.data(), pseudo_len);
     }
-    free(question.name);
+    // query_buffer 在函数结束时自动释放（RAII）
 }
 
 // === Build Package (Single) ===
@@ -402,7 +486,8 @@ static void build_package(unsigned char* package, int* package_len, int seq_num,
         case ARP_PACKAGE: {
             // Ethernet Header (14) + ARP Header (28) = 42 Bytes
             *package_len = 14 + 28;
-            if (*package_len < 60) *package_len = 60; // Padding to min ethernet frame
+            if (*package_len < PacketConfig::MIN_ETHERNET_FRAME)
+                *package_len = PacketConfig::MIN_ETHERNET_FRAME; // Padding to min ethernet frame
 
             // 1. Ethernet Header (Type = 0x0806 for ARP)
             // 注意：以太网头的 Source MAC 我们通常保持不变（使用物理网卡真实 MAC），
@@ -478,14 +563,15 @@ static timeval add_stamp(timeval* ptv, unsigned int dus) {
    ========================================================================== */
 void run_burst_mode(pcap_t* fp, const SenderConfig* cfg) {
     std::cout << "[INFO] Running BURST mode (Pre-built packets)." << std::endl;
-    std::vector<unsigned char> raw_packet(10000, 0);
+    std::vector<unsigned char> raw_packet(PacketConfig::MAX_PACKET_BUFFER_SIZE, 0);
     int packet_len = 0;
     build_package(raw_packet.data(), &packet_len, 1, cfg);
 
     if (packet_len <= 0) return;
 
-    const unsigned int npacks = 2048;
-    unsigned int queue_mem_size = (packet_len + sizeof(struct pcap_pkthdr)) * npacks + 1000;
+    const unsigned int npacks = PacketConfig::BURST_BATCH_SIZE;
+    unsigned int queue_mem_size =
+        (packet_len + sizeof(struct pcap_pkthdr)) * npacks + PacketConfig::QUEUE_MEMORY_OVERHEAD;
     pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
     if (!squeue) return;
 
@@ -510,7 +596,7 @@ void run_burst_mode(pcap_t* fp, const SenderConfig* cfg) {
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count();
-        if (elapsed_ms >= 200) {
+        if (elapsed_ms >= PacketConfig::STATS_UPDATE_INTERVAL_MS) {
             if (cfg->stats_callback) cfg->stats_callback(g_total_sent, g_total_bytes);
             last_stats_time = now;
         }
@@ -521,15 +607,15 @@ void run_burst_mode(pcap_t* fp, const SenderConfig* cfg) {
 
 void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
     std::cout << "[INFO] Running INTERVAL mode (Rebuild packets)." << std::endl;
-    unsigned int target_batch_time_us = 1000000;
+    unsigned int target_batch_time_us = PacketConfig::TARGET_BATCH_TIME_US;
     unsigned int safe_interval = (cfg->send_interval_us == 0) ? 1 : cfg->send_interval_us;
     unsigned int npacks = target_batch_time_us / safe_interval;
     if (npacks < 1) npacks = 1;
-    if (npacks > 5000) npacks = 5000;
+    if (npacks > PacketConfig::MAX_BATCH_SIZE) npacks = PacketConfig::MAX_BATCH_SIZE;
 
     long long batch_duration_us = (long long)npacks * cfg->send_interval_us;
-    std::vector<unsigned char> shared_buffer(10000, 0);
-    unsigned int queue_mem_size = (2000 + sizeof(struct pcap_pkthdr)) * npacks;
+    std::vector<unsigned char> shared_buffer(PacketConfig::MAX_PACKET_BUFFER_SIZE, 0);
+    unsigned int queue_mem_size = (PacketConfig::NORMAL_MODE_QUEUE_ESTIMATE + sizeof(struct pcap_pkthdr)) * npacks;
     pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
     if (!squeue) return;
 
@@ -548,13 +634,20 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
         unsigned int actual_sent_packs = 0;
         int packet_len = 0;
 
+        // 用于存储每批最后一个包的数据（用于 Hex 回调）
+        std::vector<unsigned char> last_packet_buffer(PacketConfig::MAX_PACKET_BUFFER_SIZE, 0);
+        int last_packet_len = 0;
+        bool has_last_packet = false;
+
         for (unsigned int i = 0; i < npacks; ++i) {
             build_package(shared_buffer.data(), &packet_len, (int)seq_counter++, cfg);
             if (packet_len <= 0) continue;
 
-            // Hex 回调逻辑 - 每个包都实时显示
-            if (cfg->hex_callback) {
-                cfg->hex_callback(shared_buffer.data(), packet_len);
+            // 保存最后一个包的数据（复制到独立缓冲区），每批只回调一次（最后一个包）
+            if (packet_len > 0 && packet_len <= PacketConfig::MAX_PACKET_BUFFER_SIZE) {
+                memcpy(last_packet_buffer.data(), shared_buffer.data(), packet_len);
+                last_packet_len = packet_len;
+                has_last_packet = true;
             }
 
             pktheader.ts = tv;
@@ -566,6 +659,11 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
             add_stamp(&tv, cfg->send_interval_us);
         }
 
+        // 每批只调用一次 Hex 回调，传递最后一个包
+        if (cfg->hex_callback && has_last_packet && last_packet_len > 0) {
+            cfg->hex_callback(last_packet_buffer.data(), last_packet_len);
+        }
+
         if (squeue->len > 0) pcap_sendqueue_transmit(fp, squeue, 1);
         g_total_sent += actual_sent_packs;
         g_total_bytes += batch_bytes;
@@ -574,7 +672,7 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
         auto now = std::chrono::steady_clock::now();
         if (now < next_batch_time) {
             auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(next_batch_time - now).count();
-            if (remaining > 1000)
+            if (remaining > PacketConfig::MIN_SLEEP_THRESHOLD_US)
                 std::this_thread::sleep_for(std::chrono::microseconds(remaining));
             else if (remaining > 0)
                 std::this_thread::yield();
@@ -587,16 +685,34 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
 
 extern "C" void start_send_mode(const SenderConfig* config) {
     char errbuf[PCAP_ERRBUF_SIZE];
-    if (!config || !config->dev_name[0]) return;
-    pcap_t* handler = pcap_open(config->dev_name, 65535, PCAP_OPENFLAG_PROMISCUOUS, 1, NULL, errbuf);
-    if (!handler) {
-        std::cerr << "[ERROR] pcap_open failed: " << errbuf << std::endl;
+    if (!config || !config->dev_name[0]) {
+        // [优化] 错误处理增强：通过回调通知 UI
+        if (config && config->error_callback) {
+            config->error_callback("Invalid configuration: device name is empty");
+        }
         return;
     }
+
+    pcap_t* handler =
+        pcap_open(config->dev_name, PacketConfig::PCAP_SNAPLEN, PCAP_OPENFLAG_PROMISCUOUS, 1, NULL, errbuf);
+    if (!handler) {
+        // [优化] 错误处理增强：通过回调通知 UI，而不是仅打印到 stderr
+        std::string error_msg = std::string("pcap_open failed: ") + errbuf;
+        std::cerr << "[ERROR] " << error_msg << std::endl;
+        if (config->error_callback) {
+            config->error_callback(error_msg.c_str());
+        }
+        return;
+    }
+
+    // 初始化随机数生成器（如果尚未初始化）
+    init_random_generator();
+
     if (config->send_interval_us == 0)
         run_burst_mode(handler, config);
     else
         run_normal_mode(handler, config);
+
     pcap_close(handler);
     std::cout << "[INFO] Sending stopped." << std::endl;
 }
@@ -667,7 +783,7 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
         else {
             int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK) {
-                int max_retries = 30;
+                int max_retries = PacketConfig::TCP_CONNECT_MAX_RETRIES;
                 for (int i = 0; i < max_retries; ++i) {
                     if (!g_is_sock_sending) break;
                     fd_set write_fds, except_fds;
@@ -738,15 +854,16 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
             next_send_time += std::chrono::microseconds(config->interval_us);
             if (next_send_time > now) {
                 auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(next_send_time - now).count();
-                if (wait_us > 100000) {
+                constexpr int LONG_SLEEP_THRESHOLD_US = 100000; // 长睡眠阈值（100ms）
+                if (wait_us > LONG_SLEEP_THRESHOLD_US) {
                     while (wait_us > 0 && g_is_sock_sending) {
-                        int sleep_slice = (wait_us > 100000) ? 100000 : wait_us;
+                        int sleep_slice = (wait_us > LONG_SLEEP_THRESHOLD_US) ? LONG_SLEEP_THRESHOLD_US : wait_us;
                         std::this_thread::sleep_for(std::chrono::microseconds(sleep_slice));
                         wait_us -= sleep_slice;
                         if (!g_is_sock_sending) break;
                     }
                 } else {
-                    if (wait_us > 1000)
+                    if (wait_us > PacketConfig::MIN_SLEEP_THRESHOLD_US)
                         std::this_thread::sleep_for(std::chrono::microseconds(wait_us));
                     else
                         while (std::chrono::steady_clock::now() < next_send_time) {
