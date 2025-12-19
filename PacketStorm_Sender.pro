@@ -14,13 +14,15 @@ SOURCES += \
     main.cpp \
     sender_core.cpp \
     sender_window.cpp \
-    resource_monitor.cpp
+    resource_monitor.cpp \
+    packet_table_model.cpp
 
 HEADERS += \
     hex_delegate.h \
     sender_core.h \
     sender_window.h \
-    resource_monitor.h
+    resource_monitor.h \
+    packet_table_model.h
 
 FORMS += \
     sender.ui

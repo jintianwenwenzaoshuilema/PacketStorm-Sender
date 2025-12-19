@@ -2,6 +2,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <vector>
 
 #ifdef _WIN32
 #include <psapi.h>
@@ -180,31 +181,32 @@ void SystemResourceMonitor::setMonitorInterface(const QString& interfaceName) {
     int bracePos = interfaceName.indexOf('{');
     if (bracePos != -1) {
         QString targetGuid = interfaceName.mid(bracePos);
+        // [优化] 使用 RAII 管理内存，自动释放
         ULONG outBufLen = 15000;
-        PIP_ADAPTER_INFO pAdapterInfo = (PIP_ADAPTER_INFO)malloc(outBufLen);
-        if (pAdapterInfo) {
-            DWORD dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
-            if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
-                free(pAdapterInfo);
-                pAdapterInfo = (PIP_ADAPTER_INFO)malloc(outBufLen);
-                if (pAdapterInfo) {
-                    dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
-                }
-            }
-            if (dwRetVal == NO_ERROR && pAdapterInfo) {
-                PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
-                while (pAdapter) {
-                    QString currentName = QString(pAdapter->AdapterName);
-                    if (targetGuid.compare(currentName, Qt::CaseInsensitive) == 0) {
-                        m_monitorInterfaceIp = QString(pAdapter->IpAddressList.IpAddress.String);
-                        if (m_monitorInterfaceIp == "0.0.0.0") m_monitorInterfaceIp.clear();
-                        break;
-                    }
-                    pAdapter = pAdapter->Next;
-                }
-            }
-            free(pAdapterInfo);
+        std::vector<BYTE> buffer(outBufLen);
+        PIP_ADAPTER_INFO pAdapterInfo = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
+
+        DWORD dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
+        if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
+            // 缓冲区不够，重新分配
+            buffer.resize(outBufLen);
+            pAdapterInfo = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
+            dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
         }
+
+        if (dwRetVal == NO_ERROR) {
+            PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
+            while (pAdapter) {
+                QString currentName = QString(pAdapter->AdapterName);
+                if (targetGuid.compare(currentName, Qt::CaseInsensitive) == 0) {
+                    m_monitorInterfaceIp = QString(pAdapter->IpAddressList.IpAddress.String);
+                    if (m_monitorInterfaceIp == "0.0.0.0") m_monitorInterfaceIp.clear();
+                    break;
+                }
+                pAdapter = pAdapter->Next;
+            }
+        }
+        // buffer 自动释放，无需手动 free
     }
 
     // 通过 IP 地址查找适配器索引（更可靠的方法）
@@ -232,89 +234,80 @@ void SystemResourceMonitor::updateNetworkStats() {
     int adapterIndex = m_cachedAdapterIndex;
 
     // 使用 GetIfTable 获取适配器统计信息（更通用的 API）
-    PMIB_IFTABLE pIfTable = nullptr;
+    // [优化] 使用 RAII 管理内存，自动释放
     ULONG dwSize = 0;
 
     // 获取所需缓冲区大小
-    if (GetIfTable(pIfTable, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
-        pIfTable = (PMIB_IFTABLE)malloc(dwSize);
-        if (!pIfTable) {
-            emit networkStatsUpdated(0.0, 0.0);
-            return;
-        }
-    } else {
+    if (GetIfTable(nullptr, &dwSize, FALSE) != ERROR_INSUFFICIENT_BUFFER) {
         emit networkStatsUpdated(0.0, 0.0);
         return;
     }
+
+    std::vector<BYTE> buffer(dwSize);
+    PMIB_IFTABLE pIfTable = reinterpret_cast<PMIB_IFTABLE>(buffer.data());
 
     // 获取适配器表
     DWORD result = GetIfTable(pIfTable, &dwSize, FALSE);
     if (result != NO_ERROR) {
-        free(pIfTable);
         emit networkStatsUpdated(0.0, 0.0);
         return;
     }
-    if (pIfTable) {
-        // 查找对应的适配器
-        bool found = false;
-        for (DWORD i = 0; i < pIfTable->dwNumEntries; i++) {
-            if (pIfTable->table[i].dwIndex == (DWORD)adapterIndex) {
-                ULONG64 currentBytesSent = pIfTable->table[i].dwOutOctets;
-                ULONG64 currentBytesRecv = pIfTable->table[i].dwInOctets;
 
-                // 使用系统时间戳来确保精确的1秒间隔计算
-                qint64 currentTimeMs = QDateTime::currentMSecsSinceEpoch();
+    // 查找对应的适配器
+    bool found = false;
+    for (DWORD i = 0; i < pIfTable->dwNumEntries; i++) {
+        if (pIfTable->table[i].dwIndex == (DWORD)adapterIndex) {
+            ULONG64 currentBytesSent = pIfTable->table[i].dwOutOctets;
+            ULONG64 currentBytesRecv = pIfTable->table[i].dwInOctets;
 
-                if (m_networkCounterInitialized && m_lastNetworkUpdateTime > 0) {
-                    qint64 timeDelta = currentTimeMs - m_lastNetworkUpdateTime;
+            // 使用系统时间戳来确保精确的1秒间隔计算
+            qint64 currentTimeMs = QDateTime::currentMSecsSinceEpoch();
 
-                    // 确保时间差至少为500ms，避免因定时器不精确导致的计算错误
-                    // 如果时间差太小，等待下一次更新
-                    if (timeDelta < 500) {
-                        // 时间差太小，跳过本次更新，等待下一次
-                        free(pIfTable);
-                        return;
-                    }
+            if (m_networkCounterInitialized && m_lastNetworkUpdateTime > 0) {
+                qint64 timeDelta = currentTimeMs - m_lastNetworkUpdateTime;
 
-                    // 计算速率 (字节/毫秒 -> MB/秒)
-                    ULONG64 bytesSentDelta =
-                        (currentBytesSent >= m_lastBytesSent) ? (currentBytesSent - m_lastBytesSent) : 0;
-                    ULONG64 bytesRecvDelta =
-                        (currentBytesRecv >= m_lastBytesRecv) ? (currentBytesRecv - m_lastBytesRecv) : 0;
-
-                    // 使用实际时间差计算速度，确保每秒更新
-                    double uploadSpeed = (double)bytesSentDelta / (1024.0 * 1024.0) * 1000.0 / timeDelta;
-                    double downloadSpeed = (double)bytesRecvDelta / (1024.0 * 1024.0) * 1000.0 / timeDelta;
-
-                    // 限制最大值，避免异常值
-                    uploadSpeed = qBound(0.0, uploadSpeed, 10000.0);
-                    downloadSpeed = qBound(0.0, downloadSpeed, 10000.0);
-
-                    // 更新基准值，为下一次计算做准备（在计算速度之后更新）
-                    m_lastBytesSent = currentBytesSent;
-                    m_lastBytesRecv = currentBytesRecv;
-                    m_lastNetworkUpdateTime = currentTimeMs;
-
-                    emit networkStatsUpdated(uploadSpeed, downloadSpeed);
-                } else {
-                    // 第一次初始化，只记录当前值，不计算速率
-                    m_lastBytesSent = currentBytesSent;
-                    m_lastBytesRecv = currentBytesRecv;
-                    m_lastNetworkUpdateTime = currentTimeMs;
-                    m_networkCounterInitialized = true;
-                    emit networkStatsUpdated(0.0, 0.0);
+                // 确保时间差至少为500ms，避免因定时器不精确导致的计算错误
+                // 如果时间差太小，等待下一次更新
+                if (timeDelta < 500) {
+                    // 时间差太小，跳过本次更新，等待下一次
+                    return;
                 }
 
-                found = true;
-                break;
+                // 计算速率 (字节/毫秒 -> MB/秒)
+                ULONG64 bytesSentDelta =
+                    (currentBytesSent >= m_lastBytesSent) ? (currentBytesSent - m_lastBytesSent) : 0;
+                ULONG64 bytesRecvDelta =
+                    (currentBytesRecv >= m_lastBytesRecv) ? (currentBytesRecv - m_lastBytesRecv) : 0;
+
+                // 使用实际时间差计算速度，确保每秒更新
+                double uploadSpeed = (double)bytesSentDelta / (1024.0 * 1024.0) * 1000.0 / timeDelta;
+                double downloadSpeed = (double)bytesRecvDelta / (1024.0 * 1024.0) * 1000.0 / timeDelta;
+
+                // 限制最大值，避免异常值
+                uploadSpeed = qBound(0.0, uploadSpeed, 10000.0);
+                downloadSpeed = qBound(0.0, downloadSpeed, 10000.0);
+
+                // 更新基准值，为下一次计算做准备（在计算速度之后更新）
+                m_lastBytesSent = currentBytesSent;
+                m_lastBytesRecv = currentBytesRecv;
+                m_lastNetworkUpdateTime = currentTimeMs;
+
+                emit networkStatsUpdated(uploadSpeed, downloadSpeed);
+            } else {
+                // 第一次初始化，只记录当前值，不计算速率
+                m_lastBytesSent = currentBytesSent;
+                m_lastBytesRecv = currentBytesRecv;
+                m_lastNetworkUpdateTime = currentTimeMs;
+                m_networkCounterInitialized = true;
+                emit networkStatsUpdated(0.0, 0.0);
             }
+
+            found = true;
+            break;
         }
-        free(pIfTable);
-        if (!found) {
-            emit networkStatsUpdated(0.0, 0.0);
-        }
-    } else {
-        free(pIfTable);
+    }
+    // buffer 自动释放，无需手动 free
+    if (!found) {
         emit networkStatsUpdated(0.0, 0.0);
     }
 #else
@@ -329,24 +322,22 @@ int SystemResourceMonitor::findAdapterIndexByIp(const QString& ipAddress) {
     }
 
     // 通过 IP 地址在 GetIpAddrTable 中查找适配器索引
-    MIB_IPADDRTABLE* pIpAddrTable = nullptr;
+    // [优化] 使用 RAII 管理内存，自动释放
     ULONG ipTableSize = 0;
 
     // 获取 IP 地址表所需缓冲区大小
-    if (GetIpAddrTable(pIpAddrTable, &ipTableSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
-        pIpAddrTable = (MIB_IPADDRTABLE*)malloc(ipTableSize);
-        if (!pIpAddrTable) {
-            return -1;
-        }
-    } else {
+    if (GetIpAddrTable(nullptr, &ipTableSize, FALSE) != ERROR_INSUFFICIENT_BUFFER) {
         return -1;
     }
+
+    std::vector<BYTE> buffer(ipTableSize);
+    MIB_IPADDRTABLE* pIpAddrTable = reinterpret_cast<MIB_IPADDRTABLE*>(buffer.data());
 
     // 获取 IP 地址表
     DWORD result = GetIpAddrTable(pIpAddrTable, &ipTableSize, FALSE);
     int adapterIndex = -1;
 
-    if (result == NO_ERROR && pIpAddrTable) {
+    if (result == NO_ERROR) {
         // 将 IP 地址字符串转换为网络字节序
         struct in_addr targetAddr;
         // 使用 inet_addr 将 IP 字符串转换为网络字节序
@@ -365,7 +356,7 @@ int SystemResourceMonitor::findAdapterIndexByIp(const QString& ipAddress) {
         }
     }
 
-    free(pIpAddrTable);
+    // buffer 自动释放，无需手动 free
     return adapterIndex;
 #else
     return -1;

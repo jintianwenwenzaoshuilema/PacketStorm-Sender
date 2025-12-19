@@ -25,10 +25,13 @@
 #include <QtCharts/QSplineSeries>
 #include <QtCharts/QValueAxis>
 
-#include "hex_delegate.h"     // [新增] 引入头文件
-#include "resource_monitor.h" // [新增] 系统资源监控
+#include "hex_delegate.h"       // [新增] 引入头文件
+#include "packet_table_model.h" // [MVC] 数据包表格模型
+#include "resource_monitor.h"   // [新增] 系统资源监控
 #include <QHBoxLayout>
+#include <QItemSelectionModel>
 #include <QMouseEvent>
+#include <QTableView>
 #include <QTableWidget>
 
 // ============================================================================
@@ -325,8 +328,13 @@ class MainWindow : public QMainWindow {
 
     HexRenderDelegate* m_hexDelegate;
 
+    // [MVC] 数据包表格模型和视图
+    PacketTableModel* m_packetModel; // 数据包表格模型
+    QTableView* m_packetTableView;   // 数据包表格视图（替换 QTableWidget）
+
     void setupHexTableStyle();
     void updateHexTable(const QByteArray& data);
+    void updateHexTableContent(const QByteArray& data); // 增量更新Hex表格内容（不重建表格）
 
     // 简易协议解析器
     struct PacketInfo {

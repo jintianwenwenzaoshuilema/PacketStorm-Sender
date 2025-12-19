@@ -1,14 +1,18 @@
 #include "sender_window.h"
 #include "ui_sender.h"
+#include <QBoxLayout>
 #include <QDateTime>
 #include <QDebug>
 #include <QGraphicsLayout>
+#include <QItemSelectionModel>
 #include <QMessageBox>
 #include <QScrollBar>
 #include <QSettings>
+#include <QTableView>
 #include <functional>
 #include <pcap.h>
 #include <thread>
+#include <vector>
 
 // ============================================================================
 // Windows API 头文件与库链接
@@ -76,43 +80,46 @@ static bool GetAdapterInfoWinAPI(const QString& pcapName, QString& outMac, QStri
     if (bracePos == -1) return false;
     QString targetGuid = pcapName.mid(bracePos);
 
+    // [优化] 使用 RAII 管理内存，自动释放
     ULONG outBufLen = 15000;
-    PIP_ADAPTER_INFO pAdapterInfo = (PIP_ADAPTER_INFO)malloc(outBufLen);
-    if (pAdapterInfo == NULL) return false;
+    std::vector<BYTE> buffer(outBufLen);
+    PIP_ADAPTER_INFO pAdapterInfo = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
 
     DWORD dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
     if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
-        free(pAdapterInfo);
-        pAdapterInfo = (PIP_ADAPTER_INFO)malloc(outBufLen);
-        if (pAdapterInfo == NULL) return false;
+        // 缓冲区不够，重新分配
+        buffer.resize(outBufLen);
+        pAdapterInfo = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
         dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
     }
 
-    bool found = false;
-    if (dwRetVal == NO_ERROR) {
-        PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
-        while (pAdapter) {
-            QString currentName = QString(pAdapter->AdapterName);
-            if (targetGuid.compare(currentName, Qt::CaseInsensitive) == 0) {
-                if (pAdapter->AddressLength == 6) {
-                    outMac = QString("%1:%2:%3:%4:%5:%6")
-                                 .arg(pAdapter->Address[0], 2, 16, QChar('0'))
-                                 .arg(pAdapter->Address[1], 2, 16, QChar('0'))
-                                 .arg(pAdapter->Address[2], 2, 16, QChar('0'))
-                                 .arg(pAdapter->Address[3], 2, 16, QChar('0'))
-                                 .arg(pAdapter->Address[4], 2, 16, QChar('0'))
-                                 .arg(pAdapter->Address[5], 2, 16, QChar('0'))
-                                 .toUpper();
-                }
-                outIp = QString(pAdapter->IpAddressList.IpAddress.String);
-                if (outIp == "0.0.0.0") outIp = "";
-                found = true;
-                break;
-            }
-            pAdapter = pAdapter->Next;
-        }
+    if (dwRetVal != NO_ERROR) {
+        return false;
     }
-    if (pAdapterInfo) free(pAdapterInfo);
+
+    bool found = false;
+    PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
+    while (pAdapter) {
+        QString currentName = QString(pAdapter->AdapterName);
+        if (targetGuid.compare(currentName, Qt::CaseInsensitive) == 0) {
+            if (pAdapter->AddressLength == 6) {
+                outMac = QString("%1:%2:%3:%4:%5:%6")
+                             .arg(pAdapter->Address[0], 2, 16, QChar('0'))
+                             .arg(pAdapter->Address[1], 2, 16, QChar('0'))
+                             .arg(pAdapter->Address[2], 2, 16, QChar('0'))
+                             .arg(pAdapter->Address[3], 2, 16, QChar('0'))
+                             .arg(pAdapter->Address[4], 2, 16, QChar('0'))
+                             .arg(pAdapter->Address[5], 2, 16, QChar('0'))
+                             .toUpper();
+            }
+            outIp = QString(pAdapter->IpAddressList.IpAddress.String);
+            if (outIp == "0.0.0.0") outIp = "";
+            found = true;
+            break;
+        }
+        pAdapter = pAdapter->Next;
+    }
+    // buffer 自动释放，无需手动 free
     return found;
 #else
     return false;
@@ -122,38 +129,41 @@ static bool GetAdapterInfoWinAPI(const QString& pcapName, QString& outMac, QStri
 // 在 sender_window.cpp 中 GetAdapterInfoWinAPI 之后添加
 static bool GetExtendedNetworkInfo(const QString& srcIp, QString& outMask, QString& outGateway) {
 #ifdef _WIN32
+    // [优化] 使用 RAII 管理内存，自动释放
     ULONG outBufLen = 15000;
-    PIP_ADAPTER_INFO pAdapterInfo = (PIP_ADAPTER_INFO)malloc(outBufLen);
-    if (pAdapterInfo == NULL) return false;
+    std::vector<BYTE> buffer(outBufLen);
+    PIP_ADAPTER_INFO pAdapterInfo = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
 
     DWORD dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
     if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
-        free(pAdapterInfo);
-        pAdapterInfo = (PIP_ADAPTER_INFO)malloc(outBufLen);
-        if (pAdapterInfo == NULL) return false;
+        // 缓冲区不够，重新分配
+        buffer.resize(outBufLen);
+        pAdapterInfo = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
         dwRetVal = GetAdaptersInfo(pAdapterInfo, &outBufLen);
     }
 
-    bool found = false;
-    if (dwRetVal == NO_ERROR) {
-        PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
-        while (pAdapter) {
-            // 遍历该网卡下的所有 IP 地址，寻找与 srcIp 匹配的
-            PIP_ADDR_STRING pIpStr = &pAdapter->IpAddressList;
-            while (pIpStr) {
-                if (QString(pIpStr->IpAddress.String) == srcIp) {
-                    outMask = QString(pIpStr->IpMask.String);
-                    outGateway = QString(pAdapter->GatewayList.IpAddress.String);
-                    found = true;
-                    break;
-                }
-                pIpStr = pIpStr->Next;
-            }
-            if (found) break;
-            pAdapter = pAdapter->Next;
-        }
+    if (dwRetVal != NO_ERROR) {
+        return false;
     }
-    if (pAdapterInfo) free(pAdapterInfo);
+
+    bool found = false;
+    PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
+    while (pAdapter) {
+        // 遍历该网卡下的所有 IP 地址，寻找与 srcIp 匹配的
+        PIP_ADDR_STRING pIpStr = &pAdapter->IpAddressList;
+        while (pIpStr) {
+            if (QString(pIpStr->IpAddress.String) == srcIp) {
+                outMask = QString(pIpStr->IpMask.String);
+                outGateway = QString(pAdapter->GatewayList.IpAddress.String);
+                found = true;
+                break;
+            }
+            pIpStr = pIpStr->Next;
+        }
+        if (found) break;
+        pAdapter = pAdapter->Next;
+    }
+    // buffer 自动释放，无需手动 free
     return found;
 #else
     return false;
@@ -167,7 +177,8 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), workerThread(nullptr), worker(nullptr), stopBtnAnim(nullptr),
       stopBtnEffect(nullptr), sockThread(nullptr), sockWorker(nullptr), m_resourceMonitor(nullptr),
       m_cpuWidget(nullptr), m_memoryWidget(nullptr), m_uploadWidget(nullptr), m_downloadWidget(nullptr),
-      m_packetsLabel(nullptr), m_bytesLabel(nullptr), m_resourceContainer(nullptr) {
+      m_packetsLabel(nullptr), m_bytesLabel(nullptr), m_resourceContainer(nullptr), m_packetModel(nullptr),
+      m_packetTableView(nullptr) {
     ui->setupUi(this);
     setupHexTableStyle();
 
@@ -803,96 +814,182 @@ void MainWindow::onProtoToggled() {
 // Wireshark 风格辅助函数
 // ============================================================================
 
-// 1. 初始化表格列宽与信号连接
+// ============================================================================
+// [MVC] 初始化表格 - 使用 Model/View 架构
+// ============================================================================
 void MainWindow::setupTrafficTable() {
-    // 1. 设置列头
-    QStringList headers;
-    headers << "No." << "Time" << "Source" << "Destination" << "Proto" << "Len"
-            << "Info";
-    ui->tablePackets->setColumnCount(7);
-    ui->tablePackets->setHorizontalHeaderLabels(headers);
+    // [MVC] 如果 Model 已存在，说明已经初始化过，直接返回
+    if (m_packetModel && m_packetTableView) {
+        return;
+    }
 
-    // 2. 样式表设置 (保持不变)
-    ui->tablePackets->setStyleSheet("QTableWidget {"
-                                    "   background-color: #050505;"
-                                    "   color: #a0a8b7;"
-                                    "   gridline-color: #1c2333;"
-                                    "   border: none;"
-                                    "   font-family: 'JetBrains Mono';"
-                                    "   font-size: 10px;"
-                                    "}"
-                                    "QHeaderView::section {"
-                                    "   background-color: #0f121a;"
-                                    "   color: #00e676;"
-                                    "   padding: 2px;"
-                                    "   border: 1px solid #1c2333;"
-                                    "   font-size: 10px;"
-                                    "   height: 18px;"
-                                    "}"
-                                    "QTableWidget::item {"
-                                    "   padding-top: 0px;"
-                                    "   padding-bottom: 0px;"
-                                    "   border: none;"
-                                    "}"
-                                    "QTableWidget::item:selected {"
-                                    "   background-color: #00e676;"
-                                    "   color: #000000;"
-                                    "}");
+    // 1. 创建 Model
+    if (!m_packetModel) {
+        m_packetModel = new PacketTableModel(this);
+    }
 
-    // 3. 基础属性
-    ui->tablePackets->verticalHeader()->setVisible(false);
-    ui->tablePackets->verticalHeader()->setDefaultSectionSize(18);
-    ui->tablePackets->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    // 2. [MVC] 将 UI 文件中的 QTableWidget 替换为 QTableView
+    // 检查 ui->tablePackets 是否存在且有效（如果已经被替换，parentWidget 会是 nullptr）
+    if (!ui->tablePackets) {
+        // 如果 tablePackets 不存在，可能是已经被替换了，直接返回
+        return;
+    }
 
-    // =========================================================
-    // [修复] 启用水平滚动条的关键设置
-    // =========================================================
-
-    // 1. 强制显示滚动条策略
-    ui->tablePackets->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-
-    // 2. 交互模式：允许用户拖拽列宽，允许列宽超出视口
-    ui->tablePackets->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-
-    // [关键修改] 必须设为 false！否则最后一列会永远收缩以适应窗口，导致不出滚动条
-    ui->tablePackets->horizontalHeader()->setStretchLastSection(false);
-
-    // 3. 设置初始列宽
-    // 给每一列足够的宽度，总宽度加起来要超过 Splitter
-    // 分给它的区域，滚动条才会出现
-    ui->tablePackets->setColumnWidth(0, UIConfig::TABLE_COL_WIDTH_NO);      // No.
-    ui->tablePackets->setColumnWidth(1, UIConfig::TABLE_COL_WIDTH_TIME);    // Time
-    ui->tablePackets->setColumnWidth(2, UIConfig::TABLE_COL_WIDTH_ADDRESS); // Source (宽一点显示完整IP)
-    ui->tablePackets->setColumnWidth(3, UIConfig::TABLE_COL_WIDTH_ADDRESS); // Destination
-    ui->tablePackets->setColumnWidth(4, UIConfig::TABLE_COL_WIDTH_PROTO);   // Proto
-    ui->tablePackets->setColumnWidth(5, UIConfig::TABLE_COL_WIDTH_LEN);     // Len
-
-    // [关键修改] 给 Info 列一个固定的、足够宽的宽度
-    ui->tablePackets->setColumnWidth(6, UIConfig::TABLE_COL_WIDTH_INFO); // Info
-
-    // =========================================================
-
-    // 4. 选择模式配置
-    ui->tablePackets->setShowGrid(false);
-    ui->tablePackets->setSelectionBehavior(QAbstractItemView::SelectRows);
-    ui->tablePackets->setSelectionMode(QAbstractItemView::SingleSelection);
-
-    // 5. 信号连接
-    ui->tablePackets->disconnect();
-
-    connect(ui->tablePackets, &QTableWidget::itemSelectionChanged, this, [this]() {
-        auto items = ui->tablePackets->selectedItems();
-        if (items.isEmpty()) return;
-        int row = items.first()->row();
-        QTableWidgetItem* dataItem = ui->tablePackets->item(row, 0);
-        if (dataItem) {
-            QByteArray data = dataItem->data(Qt::UserRole).toByteArray();
-            updateHexTable(data);
+    // 获取 QTableWidget 的父容器和布局信息
+    QWidget* parentWidget = ui->tablePackets->parentWidget();
+    if (!parentWidget) {
+        // 如果没有父容器，说明可能已经被删除或替换了
+        // 如果 m_packetTableView 已存在，说明已经初始化过
+        if (m_packetTableView) {
+            return; // 已经初始化，直接返回
         }
-        if (ui->tablePackets->hasFocus()) {
-            ui->chkAutoScroll->setChecked(false);
+        // 否则无法替换，返回
+        return;
+    }
+
+    QBoxLayout* parentLayout = qobject_cast<QBoxLayout*>(parentWidget->layout());
+    int widgetIndex = -1;
+
+    // 尝试查找 QTableWidget 在布局中的位置
+    if (parentLayout) {
+        for (int i = 0; i < parentLayout->count(); ++i) {
+            QLayoutItem* item = parentLayout->itemAt(i);
+            if (item && item->widget() == ui->tablePackets) {
+                widgetIndex = i;
+                break;
+            }
         }
-    });
+    }
+
+    // 创建 QTableView 替换 QTableWidget
+    QTableView* packetTableView = new QTableView(this);
+    packetTableView->setObjectName("tablePackets"); // 保持相同的对象名
+    packetTableView->setModel(m_packetModel);       // 绑定 Model
+
+    // 3. 样式表设置（适配 QTableView）
+    packetTableView->setStyleSheet("QTableView {"
+                                   "   background-color: #050505;"
+                                   "   color: #a0a8b7;"
+                                   "   gridline-color: #1c2333;"
+                                   "   border: none;"
+                                   "   font-family: 'JetBrains Mono';"
+                                   "   font-size: 10px;"
+                                   "}"
+                                   "QHeaderView::section {"
+                                   "   background-color: #0f121a;"
+                                   "   color: #00e676;"
+                                   "   padding: 2px;"
+                                   "   border: 1px solid #1c2333;"
+                                   "   font-size: 10px;"
+                                   "   height: 18px;"
+                                   "}"
+                                   "QTableView::item {"
+                                   "   padding-top: 0px;"
+                                   "   padding-bottom: 0px;"
+                                   "   border: none;"
+                                   "}"
+                                   "QTableView::item:selected {"
+                                   "   background-color: #00e676;"
+                                   "   color: #000000;"
+                                   "}");
+
+    // 4. 基础属性
+    packetTableView->verticalHeader()->setVisible(false);
+    packetTableView->verticalHeader()->setDefaultSectionSize(18);
+    packetTableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    // 5. 滚动条和列宽设置
+    packetTableView->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    packetTableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    packetTableView->horizontalHeader()->setStretchLastSection(false);
+
+    // 设置初始列宽
+    packetTableView->setColumnWidth(PacketTableModel::ColNo, UIConfig::TABLE_COL_WIDTH_NO);
+    packetTableView->setColumnWidth(PacketTableModel::ColTime, UIConfig::TABLE_COL_WIDTH_TIME);
+    packetTableView->setColumnWidth(PacketTableModel::ColSource, UIConfig::TABLE_COL_WIDTH_ADDRESS);
+    packetTableView->setColumnWidth(PacketTableModel::ColDestination, UIConfig::TABLE_COL_WIDTH_ADDRESS);
+    packetTableView->setColumnWidth(PacketTableModel::ColProtocol, UIConfig::TABLE_COL_WIDTH_PROTO);
+    packetTableView->setColumnWidth(PacketTableModel::ColLength, UIConfig::TABLE_COL_WIDTH_LEN);
+    packetTableView->setColumnWidth(PacketTableModel::ColInfo, UIConfig::TABLE_COL_WIDTH_INFO);
+
+    // 6. 选择模式配置
+    packetTableView->setShowGrid(false);
+    packetTableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    packetTableView->setSelectionMode(QAbstractItemView::SingleSelection);
+
+    // 7. [MVC] 替换布局中的 QTableWidget
+    if (parentLayout && widgetIndex >= 0) {
+        // 移除旧的 QTableWidget
+        QLayoutItem* item = parentLayout->takeAt(widgetIndex);
+        if (item) {
+            QWidget* oldWidget = item->widget();
+            if (oldWidget) {
+                oldWidget->hide();
+                oldWidget->setParent(nullptr);
+                oldWidget->deleteLater();
+            }
+            delete item;
+        }
+
+        // 添加新的 QTableView（QBoxLayout 有 insertWidget 方法）
+        parentLayout->insertWidget(widgetIndex, packetTableView);
+    } else if (parentWidget && ui->tablePackets) {
+        // 如果找不到 QBoxLayout，尝试直接替换父容器的子控件
+        // 隐藏旧的 QTableWidget
+        QTableWidget* oldTable = ui->tablePackets;
+        oldTable->hide();
+        oldTable->setParent(nullptr);
+        oldTable->deleteLater();
+        // 注意：不能直接设置 ui->tablePackets = nullptr，因为它是 UI 文件生成的成员
+        // 但我们可以通过检查 parentWidget 来判断是否已被替换
+
+        // 将新的 QTableView 添加到父容器
+        // 如果父容器已有布局，添加到布局中；否则创建新布局
+        QLayout* existingLayout = parentWidget->layout();
+        if (existingLayout) {
+            // 如果已有布局但不是 QBoxLayout，尝试添加到最后
+            if (QBoxLayout* boxLayout = qobject_cast<QBoxLayout*>(existingLayout)) {
+                boxLayout->addWidget(packetTableView);
+            } else {
+                // 其他类型的布局，创建包装布局
+                QVBoxLayout* wrapperLayout = new QVBoxLayout();
+                wrapperLayout->setContentsMargins(0, 0, 0, 0);
+                wrapperLayout->addWidget(packetTableView);
+                parentWidget->setLayout(wrapperLayout);
+            }
+        } else {
+            // 没有布局，创建新布局
+            QVBoxLayout* newLayout = new QVBoxLayout(parentWidget);
+            newLayout->setContentsMargins(0, 0, 0, 0);
+            newLayout->addWidget(packetTableView);
+            parentWidget->setLayout(newLayout);
+        }
+    }
+
+    // 8. [MVC] 信号连接 - 使用 QTableView 的选择模型
+    // QTableView 在设置 Model 后会自动创建 selectionModel
+    QItemSelectionModel* selectionModel = packetTableView->selectionModel();
+    if (selectionModel) {
+        connect(selectionModel, &QItemSelectionModel::selectionChanged, this,
+                [this, packetTableView](const QItemSelection& selected, const QItemSelection& deselected) {
+                    Q_UNUSED(deselected);
+                    if (selected.indexes().isEmpty() || !m_packetModel) return;
+
+                    QModelIndex index = selected.indexes().first();
+                    if (!index.isValid()) return;
+
+                    QByteArray data = m_packetModel->getRawData(index.row());
+                    if (!data.isEmpty()) {
+                        updateHexTable(data);
+                    }
+                    if (packetTableView && packetTableView->hasFocus()) {
+                        ui->chkAutoScroll->setChecked(false);
+                    }
+                });
+    }
+
+    // 9. 保存 QTableView 的引用（用于后续操作）
+    m_packetTableView = packetTableView;
 }
 
 MainWindow::PacketInfo MainWindow::parsePacket(const QByteArray& data) {
@@ -1055,11 +1152,16 @@ void MainWindow::onStartSendClicked() {
     // [UI Reset] Wireshark 风格列表初始化
     // ========================================================================
     // if (ui->txtLog) ui->txtLog->clear();          // 1. 清空左侧日志
-    ui->tablePackets->setRowCount(0); // 2. 清空中间表格
+    // [MVC] 清空 Model，View 自动更新
+    if (m_packetModel) {
+        m_packetModel->clear();
+    }
 
     m_packetCount = 0;
     setupTrafficTable();
-    ui->tablePackets->verticalHeader()->setMinimumSectionSize(15);
+    if (m_packetTableView) {
+        m_packetTableView->verticalHeader()->setMinimumSectionSize(15);
+    }
     // ========================================================================
 
     // 5. 锁定 UI
@@ -1162,45 +1264,36 @@ void MainWindow::onStartSendClicked() {
     connect(
         worker, &PacketWorker::hexUpdated, this,
         [this](QByteArray data) {
+            // [MVC] 使用 Model 添加数据包，View 自动更新
+            if (!m_packetModel) return;
+
             // 1. 数据解析
             m_packetCount++;
-            // 调用成员函数 parsePacket
-            PacketInfo info = parsePacket(data);
+            PacketInfo parseInfo = parsePacket(data);
 
-            // 2. 限制行数 (防止内存溢出，保留最近 N 条)
-            if (ui->tablePackets->rowCount() > UIConfig::MAX_PACKET_TABLE_ROWS) {
-                ui->tablePackets->removeRow(0);
-            }
+            // 2. 转换为 Model 的 PacketInfo
+            PacketTableModel::PacketInfo modelInfo;
+            modelInfo.packetNumber = m_packetCount;
+            modelInfo.timestamp = QDateTime::currentDateTime();
+            modelInfo.src = parseInfo.src;
+            modelInfo.dst = parseInfo.dst;
+            modelInfo.proto = parseInfo.proto;
+            modelInfo.length = parseInfo.length;
+            modelInfo.info = parseInfo.info;
+            modelInfo.rawData = data;
 
-            // 3. 插入新行
-            int row = ui->tablePackets->rowCount();
-            ui->tablePackets->insertRow(row);
+            // 3. [MVC] 更新 Model，View 会自动更新
+            m_packetModel->addPacket(modelInfo);
 
-            // 4. 设置单元格内容
-            // 辅助函数：创建 Item 并设置对齐
-            auto createItem = [](QString txt, bool center = false) {
-                QTableWidgetItem* it = new QTableWidgetItem(txt);
-                if (center) it->setTextAlignment(Qt::AlignCenter);
-                return it;
-            };
-
-            QTableWidgetItem* numItem = createItem(QString::number(m_packetCount), true);
-
-            ui->tablePackets->setItem(row, 0, numItem);
-            ui->tablePackets->setItem(row, 1, createItem(QDateTime::currentDateTime().toString("HH:mm:ss.zzz")));
-            ui->tablePackets->setItem(row, 2, createItem(info.src));
-            ui->tablePackets->setItem(row, 3, createItem(info.dst));
-            ui->tablePackets->setItem(row, 4, createItem(info.proto, true));
-            ui->tablePackets->setItem(row, 5, createItem(QString::number(info.length), true));
-            ui->tablePackets->setItem(row, 6, createItem(info.info));
-
-            // 5. [关键] 将原始二进制数据绑定到第 0 列 (No. 列)
-            // 这样点击这一行时，我们可以取出数据并显示在下方 Hex 视图中
-            numItem->setData(Qt::UserRole, data);
-
-            // 6. 自动滚动与视图联动
-            if (ui->chkAutoScroll->isChecked()) {
-                ui->tablePackets->scrollToBottom();
+            // 4. 自动滚动与视图联动
+            if (ui->chkAutoScroll->isChecked() && m_packetTableView && m_packetModel) {
+                int rowCount = m_packetModel->rowCount();
+                if (rowCount > 0) {
+                    QModelIndex lastIndex = m_packetModel->index(rowCount - 1, 0);
+                    if (lastIndex.isValid()) {
+                        m_packetTableView->scrollTo(lastIndex, QAbstractItemView::PositionAtBottom);
+                    }
+                }
 
                 // [修复] 自动滚动时，实时显示最新包的 Hex
                 updateHexTable(data);
@@ -1798,7 +1891,7 @@ void MainWindow::appendLog(const QString& msg, int level) {
     // 可选：如果你还想把关键系统事件(如Error)也插入到中间的表格里，保留下面代码
     // 否则可以注释掉，保持中间表格纯净显示数据包
     /*
-    if (level == 2 && ui->tablePackets) {
+    if (level == 2 && m_packetTableView) {
         // ... 插入表格的代码 ...
     }
     */
@@ -1874,16 +1967,28 @@ void MainWindow::setupHexTableStyle() {
     ui->tableHex->viewport()->installEventFilter(this);
 }
 
+// ============================================================================
+// [优化] Hex表格增量更新：如果行数相同，只更新内容，不重建表格
+// ============================================================================
 void MainWindow::updateHexTable(const QByteArray& data) {
+    int len = data.size();
+    int rowCount = (len + 15) / 16;
+    int currentRowCount = ui->tableHex->rowCount();
+
+    // 如果行数相同，使用增量更新（只更新内容，不重建表格）
+    if (currentRowCount == rowCount && rowCount > 0) {
+        updateHexTableContent(data);
+        return;
+    }
+
+    // 行数不同，需要重建表格
     ui->tableHex->setRowCount(0); // 清空
 
-    int len = data.size();
     const unsigned char* p = (const unsigned char*)data.constData();
 
     // 强制行高，使视图紧凑
     ui->tableHex->verticalHeader()->setDefaultSectionSize(20);
 
-    int rowCount = (len + 15) / 16;
     ui->tableHex->setRowCount(rowCount);
 
     for (int i = 0; i < len; i += 16) {
@@ -1921,6 +2026,69 @@ void MainWindow::updateHexTable(const QByteArray& data) {
 
         ui->tableHex->setItem(row, 1, new QTableWidgetItem(hexStr));
         ui->tableHex->setItem(row, 2, new QTableWidgetItem(asciiStr));
+    }
+}
+
+// ============================================================================
+// [新增] 增量更新Hex表格内容（不重建表格，只更新现有单元格）
+// ============================================================================
+void MainWindow::updateHexTableContent(const QByteArray& data) {
+    int len = data.size();
+    const unsigned char* p = (const unsigned char*)data.constData();
+
+    for (int i = 0; i < len; i += 16) {
+        int row = i / 16;
+
+        // --- Column 0: Offset（通常不变，但为了完整性也更新）---
+        QString offsetStr = QString("%1").arg(i, 4, 16, QChar('0')).toUpper();
+        QTableWidgetItem* offsetItem = ui->tableHex->item(row, 0);
+        if (offsetItem) {
+            offsetItem->setText(offsetStr);
+        } else {
+            ui->tableHex->setItem(row, 0, new QTableWidgetItem(offsetStr));
+        }
+
+        // --- Column 1: Hex & Column 2: ASCII ---
+        QString hexStr;
+        QString asciiStr;
+
+        for (int j = 0; j < 16; ++j) {
+            if (i + j < len) {
+                unsigned char b = p[i + j];
+
+                // Hex: 2位大写
+                hexStr += QString("%1").arg(b, 2, 16, QChar('0')).toUpper();
+
+                // ASCII: 可见字符或点
+                if (b >= 32 && b <= 126)
+                    asciiStr += QChar(b);
+                else
+                    asciiStr += ".";
+
+                // 分隔符逻辑 (Delegate 依赖此逻辑)
+                if (j == 7)
+                    hexStr += "  "; // 8字节处：双空格
+                else if (j != 15)
+                    hexStr += " "; // 其他：单空格
+            }
+            // 如果数据不足一行，不需要填充空格，留空即可
+        }
+
+        // 更新或创建 Hex 列
+        QTableWidgetItem* hexItem = ui->tableHex->item(row, 1);
+        if (hexItem) {
+            hexItem->setText(hexStr);
+        } else {
+            ui->tableHex->setItem(row, 1, new QTableWidgetItem(hexStr));
+        }
+
+        // 更新或创建 ASCII 列
+        QTableWidgetItem* asciiItem = ui->tableHex->item(row, 2);
+        if (asciiItem) {
+            asciiItem->setText(asciiStr);
+        } else {
+            ui->tableHex->setItem(row, 2, new QTableWidgetItem(asciiStr));
+        }
     }
 }
 
@@ -2317,10 +2485,10 @@ void MainWindow::setupTooltips() {
     }
 
     // 数据包表格
-    if (ui->tablePackets) {
-        ui->tablePackets->setToolTip("已发送数据包列表\n"
-                                     "显示每批发送的最后一个数据包的详细信息\n"
-                                     "点击行可查看数据包的十六进制内容");
+    if (m_packetTableView) {
+        m_packetTableView->setToolTip("已发送数据包列表\n"
+                                      "显示每批发送的最后一个数据包的详细信息\n"
+                                      "点击行可查看数据包的十六进制内容");
     }
 
     // Hex视图
