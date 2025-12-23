@@ -89,6 +89,16 @@ struct SenderConfig {
 
     // [新增] 错误回调指针
     ErrorCallback error_callback;
+
+    // [新增] SYN Flood 模式配置
+    bool use_random_src_port;  // 是否使用随机源端口（SYN Flood模式）
+    bool use_random_seq;       // 是否使用随机序列号（SYN Flood模式）
+    bool use_random_src_mac;   // 是否使用随机源MAC地址（SYN Flood模式）
+    bool use_random_src_ip;    // 是否使用随机源IP地址（SYN Flood模式）
+    
+    // [新增] 随机IP地址范围配置（用于use_random_src_ip）
+    unsigned char random_ip_base[4];  // 基础IP地址（用于计算随机IP范围）
+    unsigned char random_ip_mask[4];  // 子网掩码（用于限制随机IP范围）
 };
 
 typedef void (*LogCallback)(const char* msg, int level);
@@ -97,11 +107,28 @@ struct SocketConfig {
     char target_ip[32];
     unsigned short target_port;
     char source_ip[32];
+    unsigned short source_port; // [新增] 固定源端口
     bool is_udp;
+    bool is_connect_only;
+    
+    // [新增] 随机化选项
+    bool use_random_src_port;
+    bool use_random_src_mac;
+    bool use_random_src_ip;
+    bool use_random_seq;
+    
+    // [新增] 随机IP范围
+    unsigned char random_ip_base[4];
+    unsigned char random_ip_mask[4];
+    unsigned char src_mac[6]; // 基础MAC用于随机化参考
+
     int payload_len;
     unsigned int interval_us;
     StatsCallback stats_callback;
     LogCallback log_callback;
+    
+    // [新增] 增加网卡名称，用于在伪造模式下进行监听和注入
+    char dev_name[256];
 };
 
 __declspec(dllexport) void start_send_mode(const SenderConfig* config);

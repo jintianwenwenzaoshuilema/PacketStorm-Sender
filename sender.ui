@@ -845,6 +845,108 @@
                                         </widget>
                                     </item>
                                     <item>
+                                        <widget class="QCheckBox" name="chkConnectFlood">
+                                            <property name="styleSheet">
+                                                <string notr="true">color: #FFB74D; font-weight: bold;</string>
+                                            </property>
+                                            <property name="text">
+                                                <string>Connect &amp; Close Mode (Full Handshake)</string>
+                                            </property>
+                                            <property name="toolTip">
+                                                <string>建立完整的TCP三次握手后立即断开，形成完整的生命周期。
+这可以防止服务器因半开连接而重发 SYN-ACK。</string>
+                                            </property>
+                                        </widget>
+                                    </item>
+                                    <item>
+                                        <widget class="QFrame" name="sockRandomContainer">
+                                            <property name="styleSheet">
+                                                <string notr="true">QFrame { border: none; }</string>
+                                            </property>
+                                            <layout class="QVBoxLayout" name="randLayout">
+                                                <property name="spacing">
+                                                    <number>2</number>
+                                                </property>
+                                                <property name="leftMargin">
+                                                    <number>10</number>
+                                                </property>
+                                                <property name="topMargin">
+                                                    <number>0</number>
+                                                </property>
+                                                <property name="rightMargin">
+                                                    <number>0</number>
+                                                </property>
+                                                <property name="bottomMargin">
+                                                    <number>0</number>
+                                                </property>
+                                                <item>
+                                                    <widget class="QCheckBox" name="chkSockRandPort">
+                                                        <property name="styleSheet">
+                                                            <string notr="true">color: #4FD1C5; font-size: 10px;</string>
+                                                        </property>
+                                                        <property name="text">
+                                                            <string>Random Source Port</string>
+                                                        </property>
+                                                    </widget>
+                                                </item>
+                                                <item>
+                                                    <widget class="QCheckBox" name="chkSockRandMac">
+                                                        <property name="styleSheet">
+                                                            <string notr="true">color: #4FD1C5; font-size: 10px;</string>
+                                                        </property>
+                                                        <property name="text">
+                                                            <string>Random Source MAC (Spoofing)</string>
+                                                        </property>
+                                                    </widget>
+                                                </item>
+                                                <item>
+                                                    <widget class="QCheckBox" name="chkSockRandIp">
+                                                        <property name="styleSheet">
+                                                            <string notr="true">color: #4FD1C5; font-size: 10px;</string>
+                                                        </property>
+                                                        <property name="text">
+                                                            <string>Random Source IP (Spoofing)</string>
+                                                        </property>
+                                                    </widget>
+                                                </item>
+                                                <item>
+                                                    <widget class="QCheckBox" name="chkSockRandSeq">
+                                                        <property name="styleSheet">
+                                                            <string notr="true">color: #4FD1C5; font-size: 10px;</string>
+                                                        </property>
+                                                        <property name="text">
+                                                            <string>Random Sequence Number</string>
+                                                        </property>
+                                                    </widget>
+                                                </item>
+                                            </layout>
+                                        </widget>
+                                    </item>
+                                    <item>
+                                        <layout class="QHBoxLayout" name="sPortLayout">
+                                            <item>
+                                                <widget class="QLabel" name="lblSockSPort">
+                                                    <property name="text">
+                                                        <string>Source Port:</string>
+                                                    </property>
+                                                </widget>
+                                            </item>
+                                            <item>
+                                                <widget class="QSpinBox" name="spinSockSPort">
+                                                    <property name="styleSheet">
+                                                        <string notr="true">background: #1a202c; color: #E2E8F0; border: 1px solid #2d3748;</string>
+                                                    </property>
+                                                    <property name="specialValueText">
+                                                        <string>Auto</string>
+                                                    </property>
+                                                    <property name="maximum">
+                                                        <number>65535</number>
+                                                    </property>
+                                                </widget>
+                                            </item>
+                                        </layout>
+                                    </item>
+                                    <item>
                                         <widget class="QLabel" name="lblSockInt">
                                             <property name="text">
                                                 <string>Interval (µs):</string>

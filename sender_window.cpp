@@ -1,6 +1,7 @@
 #include "sender_window.h"
 #include "ui_sender.h"
 #include <QBoxLayout>
+#include <QCloseEvent> // [新增] 窗口关闭事件
 #include <QDateTime>
 #include <QDebug>
 #include <QGraphicsLayout>
@@ -178,7 +179,7 @@ MainWindow::MainWindow(QWidget* parent)
       stopBtnEffect(nullptr), sockThread(nullptr), sockWorker(nullptr), m_resourceMonitor(nullptr),
       m_cpuWidget(nullptr), m_memoryWidget(nullptr), m_uploadWidget(nullptr), m_downloadWidget(nullptr),
       m_packetsLabel(nullptr), m_bytesLabel(nullptr), m_resourceContainer(nullptr), m_packetModel(nullptr),
-      m_packetTableView(nullptr) {
+      m_packetTableView(nullptr), m_isLoadingConfig(true) {
     ui->setupUi(this);
     setupHexTableStyle();
 
@@ -280,10 +281,63 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->rbPayFixed, &QRadioButton::toggled, this, &MainWindow::onPayloadModeChanged);
     connect(ui->rbPayCustom, &QRadioButton::toggled, this, &MainWindow::onPayloadModeChanged);
     connect(ui->btnGetMac, &QPushButton::clicked, this, &MainWindow::onGetDstMacClicked);
-
+    
     // [新增] 连接右侧 Socket 发送模块的信号
     connect(ui->btnSockStart, &QPushButton::clicked, this, &MainWindow::onSockStartClicked);
     connect(ui->btnSockStop, &QPushButton::clicked, this, &MainWindow::onSockStopClicked);
+
+    // 信号联动
+    connect(ui->rbSockUdp, &QRadioButton::toggled, this, [this](bool checked) {
+        ui->chkConnectFlood->setVisible(!checked);
+        ui->sockRandomContainer->setVisible(!checked && ui->chkConnectFlood->isChecked());
+    });
+    // [修改] 联动逻辑：采用自动切换（Auto-Uncheck）模式，不再禁用按钮
+    auto handleSpoofingToggled = [this](bool checked) {
+        if (m_isLoadingConfig) return; 
+
+        if (checked) {
+            // 如果开启了伪造模式，自动取消“完整握手”的勾选
+            if (ui->chkConnectFlood->isChecked()) {
+                ui->chkConnectFlood->blockSignals(true); // 防止循环触发
+                ui->chkConnectFlood->setChecked(false);
+                ui->chkConnectFlood->blockSignals(false);
+                appendLog("[SOCK] Spoofing enabled: Switching to Raw mode.", 1);
+            }
+        }
+    };
+    connect(ui->chkSockRandMac, &QCheckBox::toggled, this, handleSpoofingToggled);
+    connect(ui->chkSockRandIp, &QCheckBox::toggled, this, handleSpoofingToggled);
+
+    // 处理 ConnectFlood 勾选时的情况
+    connect(ui->chkConnectFlood, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_isLoadingConfig) return;
+
+        ui->sockRandomContainer->setVisible(checked || ui->chkSockRandMac->isChecked() || ui->chkSockRandIp->isChecked());
+        
+        if (checked) {
+            // 如果勾选了完整握手，自动取消伪造选项的勾选
+            bool changed = false;
+            if (ui->chkSockRandMac->isChecked()) {
+                ui->chkSockRandMac->blockSignals(true);
+                ui->chkSockRandMac->setChecked(false);
+                ui->chkSockRandMac->blockSignals(false);
+                changed = true;
+            }
+            if (ui->chkSockRandIp->isChecked()) {
+                ui->chkSockRandIp->blockSignals(true);
+                ui->chkSockRandIp->setChecked(false);
+                ui->chkSockRandIp->blockSignals(false);
+                changed = true;
+            }
+            if (changed) {
+                appendLog("[SOCK] Full Handshake enabled: Spoofing disabled.", 1);
+            }
+        }
+    });
+    connect(ui->chkSockRandPort, &QCheckBox::toggled, this, [this](bool checked) {
+        ui->lblSockSPort->setVisible(!checked);
+        ui->spinSockSPort->setVisible(!checked);
+    });
 
     connect(ui->editCustomData, &QLineEdit::textChanged, this, [this](const QString& text) {
         if (ui->rbPayCustom->isChecked()) {
@@ -292,9 +346,11 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     setupChart();
-    loadHistory();
-    loadMacHistory();
     loadConfig();
+
+    // [修复] 在所有配置加载完成后，再连接网卡切换信号，彻底避免启动时的保存干扰
+    connect(ui->comboInterfaceTx, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &MainWindow::onInterfaceSelectionChanged);
 
     // [新增] 启动系统资源监控
     if (m_resourceMonitor) {
@@ -314,15 +370,51 @@ MainWindow::MainWindow(QWidget* parent)
     // [新增] 为所有控件设置tooltip
     setupTooltips();
 
-    onProtoToggled();
-    onPayloadModeChanged();
-    emit ui->spinInterval->valueChanged(ui->spinInterval->value());
     setupTrafficTable();
+    
+    // [修复] 在配置加载完成后，手动同步一次 UI 状态逻辑（取消禁用模式，改为状态同步）
+    bool isSpoofing = ui->chkSockRandMac->isChecked() || ui->chkSockRandIp->isChecked();
+    bool isConnect = ui->chkConnectFlood->isChecked();
+
+    if (isSpoofing && isConnect) {
+        // 如果配置冲突（同时存了两个），优先保留伪造模式
+        ui->chkConnectFlood->setChecked(false);
+    }
+    
+    // 确保所有控件都是启用状态
+    ui->chkConnectFlood->setEnabled(true);
+    ui->chkSockRandMac->setEnabled(true);
+    ui->chkSockRandIp->setEnabled(true);
+    
+    // 同步容器可见性
+    ui->sockRandomContainer->setVisible(isSpoofing || isConnect);
+
     appendLog("System Ready. Configuration restored.", 1);
 }
 
-MainWindow::~MainWindow() {
+// [新增] 窗口关闭事件处理
+void MainWindow::closeEvent(QCloseEvent* event) {
+    // [调试] 输出关闭事件（仅在Debug模式下）
+    #ifdef QT_DEBUG
+    qDebug() << "closeEvent() called - saving config before closing";
+    qDebug() << "Current UI state - protocol UDP:" << ui->rbUdp->isChecked()
+             << "TCP:" << ui->rbTcp->isChecked()
+             << "ICMP:" << ui->rbIcmp->isChecked()
+             << "src_port:" << ui->spinSrcPort->value()
+             << "dst_port:" << ui->spinDstPort->value();
+    #endif
+    
+    // 保存配置
     saveConfig();
+    
+    // 接受关闭事件
+    event->accept();
+}
+
+MainWindow::~MainWindow() {
+    // 注意：closeEvent 已经调用了 saveConfig()，正常情况下不需要在这里再次保存
+    // 但如果窗口是通过其他方式销毁的（例如程序异常退出），这里作为最后的保障
+    // 由于 closeEvent 在窗口关闭时总是会被调用，这里的保存通常是冗余的
 
     // 停止左侧 WinPcap 线程
     g_is_sending = false;
@@ -352,25 +444,44 @@ MainWindow::~MainWindow() {
 }
 
 // ============================================================================
+// [新增] 辅助解析函数
+// ============================================================================
+void MainWindow::parseMac(const QString& s, unsigned char* buf) {
+    static const QRegularExpression regex("[:-]");
+    QStringList p = s.split(regex);
+    for (int i = 0; i < 6 && i < p.size(); ++i) {
+        buf[i] = (unsigned char)p[i].toUInt(nullptr, 16);
+    }
+}
+
+void MainWindow::parseIp(const QString& s, unsigned char* buf) {
+    QStringList p = s.split('.');
+    for (int i = 0; i < 4 && i < p.size(); ++i) {
+        buf[i] = (unsigned char)p[i].toUInt();
+    }
+}
+
+// ============================================================================
 // [新增] 右侧 Socket 模块实现 (OS Stack Sender)
 // ============================================================================
 void MainWindow::onSockStartClicked() {
     // 1. 安全检查：如果指针不为空且线程正在运行，则通过
     if (sockThread && sockThread->isRunning()) return;
 
+    // 2. 保存配置（确保发送时使用的配置被保存）
+    saveConfig();
+
     // UI 锁定逻辑...
     ui->btnSockStart->setEnabled(false);
     ui->btnSockStop->setEnabled(true);
 
     // 锁定控件...
-    ui->grpSocketSender->findChild<QWidget*>("grpSockProto")->setEnabled(false);
+    ui->grpSockProto->setEnabled(false);
     ui->editSockIp->setEnabled(false);
     ui->spinSockPort->setEnabled(false);
     ui->spinSockLen->setEnabled(false);
     ui->spinSockInt->setEnabled(false);
-    if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
-        ui->comboSockSrc->setEnabled(false);
-    }
+    ui->comboSockSrc->setEnabled(false);
 
     // 重置数据...
     g_sock_total_sent = 0;
@@ -389,26 +500,58 @@ void MainWindow::onSockStartClicked() {
     strncpy(sockWorker->config.target_ip, ip.c_str(), sizeof(sockWorker->config.target_ip) - 1);
 
     memset(sockWorker->config.source_ip, 0, sizeof(sockWorker->config.source_ip));
-    if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
-        QString selectedPcapName = ui->comboSockSrc->currentData().toString();
-        if (selectedPcapName.isEmpty()) {
-            strcpy(sockWorker->config.source_ip, "0.0.0.0");
-            appendLog("[SOCK] Routing: Auto (Default)", 0);
+    QString selectedPcapName = ui->comboSockSrc->currentData().toString();
+    if (selectedPcapName.isEmpty()) {
+        strcpy(sockWorker->config.source_ip, "0.0.0.0");
+        appendLog("[SOCK] Routing: Auto (Default)", 0);
+    } else {
+        QString mac, srcIp;
+        if (GetAdapterInfoWinAPI(selectedPcapName, mac, srcIp) && !srcIp.isEmpty() && srcIp != "0.0.0.0") {
+            strncpy(sockWorker->config.source_ip, srcIp.toStdString().c_str(),
+                    sizeof(sockWorker->config.source_ip) - 1);
+            appendLog("[SOCK] Bound Interface: " + srcIp, 0);
         } else {
-            QString mac, srcIp;
-            if (GetAdapterInfoWinAPI(selectedPcapName, mac, srcIp) && !srcIp.isEmpty() && srcIp != "0.0.0.0") {
-                strncpy(sockWorker->config.source_ip, srcIp.toStdString().c_str(),
-                        sizeof(sockWorker->config.source_ip) - 1);
-                appendLog("[SOCK] Bound Interface: " + srcIp, 0);
-            } else {
-                strcpy(sockWorker->config.source_ip, "0.0.0.0");
-                appendLog("[SOCK] Warning: Selected interface has no IPv4. Fallback to Auto.", 2);
-            }
+            strcpy(sockWorker->config.source_ip, "0.0.0.0");
+            appendLog("[SOCK] Warning: Selected interface has no IPv4. Fallback to Auto.", 2);
         }
     }
 
     sockWorker->config.target_port = ui->spinSockPort->value();
     sockWorker->config.is_udp = ui->rbSockUdp->isChecked();
+    
+    // [修改] 增加 Connect Only 模式判断
+    sockWorker->config.is_connect_only = ui->chkConnectFlood->isChecked();
+    
+    // [新增] 填充随机化选项和端口设置
+    sockWorker->config.use_random_src_port = ui->chkSockRandPort->isChecked();
+    sockWorker->config.use_random_src_mac = ui->chkSockRandMac->isChecked();
+    sockWorker->config.use_random_src_ip = ui->chkSockRandIp->isChecked();
+    sockWorker->config.use_random_seq = ui->chkSockRandSeq->isChecked();
+    sockWorker->config.source_port = (unsigned short)ui->spinSockSPort->value();
+
+    // [修复] 填充网卡名称：必须使用右侧 comboSockSrc 的选择，而非左侧
+    strncpy(sockWorker->config.dev_name, selectedPcapName.toStdString().c_str(), sizeof(sockWorker->config.dev_name) - 1);
+    
+    // 复制基础MAC
+    QString baseMac = ui->editSrcMac->text();
+    parseMac(baseMac, sockWorker->config.src_mac);
+
+    // 填充随机IP基础和掩码
+    if (sockWorker->config.use_random_src_ip) {
+        QString srcIpStr = ui->editSrcIp->text();
+        QStringList ipParts = srcIpStr.split('.');
+        if (ipParts.size() == 4) {
+            sockWorker->config.random_ip_base[0] = (unsigned char)ipParts[0].toInt();
+            sockWorker->config.random_ip_base[1] = (unsigned char)ipParts[1].toInt();
+            sockWorker->config.random_ip_base[2] = (unsigned char)ipParts[2].toInt();
+            sockWorker->config.random_ip_base[3] = 0;
+            sockWorker->config.random_ip_mask[0] = 255;
+            sockWorker->config.random_ip_mask[1] = 255;
+            sockWorker->config.random_ip_mask[2] = 255;
+            sockWorker->config.random_ip_mask[3] = 0;
+        }
+    }
+
     sockWorker->config.payload_len = ui->spinSockLen->value();
     sockWorker->config.interval_us = ui->spinSockInt->value();
 
@@ -428,17 +571,17 @@ void MainWindow::onSockStartClicked() {
     connect(sockThread, &QThread::finished, this, [this]() {
         ui->btnSockStart->setEnabled(true);
         ui->btnSockStop->setEnabled(false);
-        ui->grpSocketSender->findChild<QWidget*>("grpSockProto")->setEnabled(true);
+        ui->grpSockProto->setEnabled(true);
         ui->editSockIp->setEnabled(true);
         ui->spinSockPort->setEnabled(true);
         ui->spinSockLen->setEnabled(true);
         ui->spinSockInt->setEnabled(true);
-
-        if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
-            ui->comboSockSrc->setEnabled(true);
-        }
+        ui->comboSockSrc->setEnabled(true);
 
         appendLog("[SOCK] Standard Sender stopped.", 0);
+
+        // 保存配置（作为保障，确保Socket发送线程结束时的配置被保存）
+        saveConfig();
 
         // [这里是修复的核心] 将指针置空，防止下次点击时访问野指针
         sockThread = nullptr;
@@ -453,6 +596,9 @@ void MainWindow::onSockStopClicked() {
     // 设置停止标志，线程循环检测到后会退出
     g_is_sock_sending = false;
     ui->btnSockStop->setEnabled(false);
+    
+    // 保存配置（确保停止时的配置被保存）
+    saveConfig();
 }
 
 void MainWindow::updateSockStats(uint64_t sent, uint64_t bytes) {
@@ -572,12 +718,10 @@ void MainWindow::loadInterfaces() {
     ui->comboInterfaceTx->clear();
 
     // [新增] 清空并初始化右侧 Socket 源列表
-    // 注意：请确保你在 ui_sender.h 或 UI 文件中已经添加了 comboSockSrc
-    if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
-        ui->comboSockSrc->clear();
-        ui->comboSockSrc->addItem("Auto (Let OS Decide)",
-                                  ""); // 默认选项，对应 IP 为空
-    }
+    // [新增] 填充右侧 (Socket)
+    ui->comboSockSrc->clear();
+    ui->comboSockSrc->addItem("Auto (Let OS Decide)",
+                              ""); // 默认选项，对应 IP 为空
 
     pcap_if_t* alldevs;
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -596,14 +740,11 @@ void MainWindow::loadInterfaces() {
 
         // [新增] 填充右侧 (Socket)
         // 我们存入 pcapName，在点击开始时再解析出 IP
-        if (ui->centralwidget->findChild<QComboBox*>("comboSockSrc")) {
-            ui->comboSockSrc->addItem(desc, pcapName);
-        }
+        ui->comboSockSrc->addItem(desc, pcapName);
     }
     pcap_freealldevs(alldevs);
 
-    connect(ui->comboInterfaceTx, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            &MainWindow::onInterfaceSelectionChanged);
+    // [修复] 信号连接已移动到构造函数中 loadConfig() 之后
     // 不在这里自动选择第一个网口，让 loadConfig() 来决定选择哪个网口
 }
 
@@ -633,8 +774,10 @@ void MainWindow::onInterfaceSelectionChanged(int index) {
         m_resourceMonitor->setMonitorInterface(pcapName);
     }
 
-    // 保存当前选择的网口
-    saveConfig();
+    // 保存当前选择的网口（仅在非初始化/加载配置期间保存）
+    if (!m_isLoadingConfig) {
+        saveConfig();
+    }
 }
 void MainWindow::onGetDstMacClicked() {
 #ifdef _WIN32
@@ -790,7 +933,7 @@ void MainWindow::onProtoToggled() {
     ui->grpPayload->setVisible(showPayloadOpts);
     ui->containerDns->setVisible(isDns);
     ui->containerTcpFlags->setVisible(isTcp);
-
+    
     // 所有协议都允许设置发包间隔
     ui->lblIntVal->setVisible(true);
     ui->spinInterval->setVisible(true);
@@ -1122,12 +1265,11 @@ void MainWindow::onStartSendClicked() {
     // 1. 防止重复启动
     if (workerThread && workerThread->isRunning()) return;
 
-    // 2. 保存历史与配置
-    saveHistory(ui->editDstIp->currentText());
+    // 2. 保存配置与历史记录
+    saveConfig();
+
     // editDstMac 现在是 QComboBox，使用 currentText()
     QString dstMac = qobject_cast<QComboBox*>(ui->editDstMac)->currentText();
-    saveMacHistory(dstMac);
-    saveConfig();
 
     // 注意：dstMac 变量在后面还会使用，所以在这里声明
 
@@ -1185,16 +1327,6 @@ void MainWindow::onStartSendClicked() {
     std::string dev = ui->comboInterfaceTx->currentData().toString().toStdString();
     strncpy(worker->config.dev_name, dev.c_str(), sizeof(worker->config.dev_name) - 1);
 
-    auto parseMac = [](QString s, unsigned char* buf) {
-        static const QRegularExpression regex("[:-]");
-        QStringList p = s.split(regex);
-        for (int i = 0; i < 6 && i < p.size(); ++i) buf[i] = p[i].toUInt(nullptr, 16);
-    };
-    auto parseIp = [](QString s, unsigned char* buf) {
-        QStringList p = s.split('.');
-        for (int i = 0; i < 4 && i < p.size(); ++i) buf[i] = p[i].toUInt();
-    };
-
     parseMac(ui->editSrcMac->text(), worker->config.src_mac);
     // editDstMac 现在是 QComboBox，使用 currentText()
     // dstMac 变量已在上面声明，这里直接使用
@@ -1226,6 +1358,17 @@ void MainWindow::onStartSendClicked() {
         if (ui->chkPsh->isChecked()) flags |= 0x08;
         if (ui->chkAck->isChecked()) flags |= 0x10;
         worker->config.tcp_flags = flags;
+        
+        worker->config.use_random_src_port = false;
+        worker->config.use_random_seq = false;
+        worker->config.use_random_src_mac = false;
+        worker->config.use_random_src_ip = false;
+    } else {
+        // 非TCP协议，重置SYN Flood配置
+        worker->config.use_random_src_port = false;
+        worker->config.use_random_seq = false;
+        worker->config.use_random_src_mac = false;
+        worker->config.use_random_src_ip = false;
     }
 
     std::string domain = ui->editDomain->text().toStdString();
@@ -1310,6 +1453,10 @@ void MainWindow::onStartSendClicked() {
         ui->grpParam->setEnabled(true);
         ui->grpPayload->setEnabled(true);
         ui->grpAddr->setEnabled(true);
+        
+        // 保存配置（作为保障，确保线程结束时的配置被保存）
+        saveConfig();
+        
         // appendLog("Transmission thread stopped.", 0); // 你的旧日志函数
     });
 
@@ -1347,19 +1494,22 @@ void MainWindow::onStopSendClicked() {
     // 从而产生巨大的 PPS 尖峰 (Spike) 或者 0 值 (Dip)。
     // ==============================================================================
 
-    // 2. 我们只更新底部的“数字”显示，确保显示的是最终的原子计数
+    // 2. 我们只更新底部的"数字"显示，确保显示的是最终的原子计数
     // 参数3和4传 0，表示停止时的瞬时速率为 0
     updateStatsDisplay(g_total_sent.load(), g_total_bytes.load());
 
     // 注意：中间的速度显示（Upload/Download）会继续显示网卡的总流量
     // 这是正常的，因为速率统计独立于发送状态，软件启动时就开始统计
 
-    // 3. 记录日志
+    // 3. 保存配置（确保停止时的配置被保存）
+    saveConfig();
+
+    // 4. 记录日志
     QString summary =
         QString("Stopped. Final Total: %1 packets, %2 bytes sent.").arg(g_total_sent.load()).arg(g_total_bytes.load());
     appendLog(summary, 1); // 1 = Green/Success Color
 
-    // 4. 清理动画效果
+    // 5. 清理动画效果
     if (stopBtnAnim) {
         stopBtnAnim->stop();
         delete stopBtnAnim;
@@ -1476,21 +1626,40 @@ void MainWindow::updateStats(uint64_t currSent, uint64_t currBytes) {
 // 加载配置 (启动时恢复界面状态)
 // ============================================================================
 void MainWindow::loadConfig() {
+    m_isLoadingConfig = true; // [新增] 设置加载标志
     QSettings settings("PacketStorm", "SenderConfig");
+    
+    // --- 1. 加载历史记录 (原本在 loadHistory/loadMacHistory 中) ---
+    // IP 历史
+    QStringList ipHistory = settings.value("history/dst_ip").toStringList();
+    ui->editDstIp->clear();
+    if (!ipHistory.isEmpty()) {
+        ui->editDstIp->addItems(ipHistory);
+        ui->editDstIp->setCurrentIndex(0);
+    }
+    
+    // MAC 历史
+    QStringList macHistory = settings.value("history/dst_mac").toStringList();
+    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+    if (macCombo) {
+        macCombo->clear();
+        if (!macHistory.isEmpty()) {
+            macCombo->addItems(macHistory);
+        }
+    }
 
-    // 1. 恢复主窗口几何
+    // --- 2. 恢复主窗口几何与分割条状态 ---
     if (settings.contains("window/geometry")) {
         restoreGeometry(settings.value("window/geometry").toByteArray());
     }
 
     // 2. 恢复底部三栏比例 (Bottom Horizontal)
-    QSplitter* splitterBot = ui->grpLog->findChild<QSplitter*>("splitterBottom");
-    if (splitterBot) {
+    if (ui->splitterBottom) {
         if (settings.contains("window/splitter_bottom_state")) {
-            splitterBot->restoreState(settings.value("window/splitter_bottom_state").toByteArray());
+            ui->splitterBottom->restoreState(settings.value("window/splitter_bottom_state").toByteArray());
         } else {
             // 默认比例：日志 : 表格 : Hex
-            splitterBot->setSizes(QList<int>()
+            ui->splitterBottom->setSizes(QList<int>()
                                   << UIConfig::SPLITTER_BOTTOM_LOG_WIDTH << UIConfig::SPLITTER_BOTTOM_TABLE_WIDTH
                                   << UIConfig::SPLITTER_BOTTOM_HEX_WIDTH);
         }
@@ -1530,43 +1699,56 @@ void MainWindow::loadConfig() {
         }
     }
     // 如果有保存的网口就选择它，否则选择第一个
+    ui->comboInterfaceTx->blockSignals(true); // [修复] 暂时断开信号连接，避免触发onInterfaceSelectionChanged()导致配置被重置
     if (idx != -1 && idx < ui->comboInterfaceTx->count()) {
         ui->comboInterfaceTx->setCurrentIndex(idx);
     } else if (ui->comboInterfaceTx->count() > 0) {
         ui->comboInterfaceTx->setCurrentIndex(0);
     }
+    ui->comboInterfaceTx->blockSignals(false); // [修复] 恢复信号连接
+    
+    // 手动调用一次，以更新源MAC和IP显示，但不触发saveConfig
+    onInterfaceSelectionChanged(ui->comboInterfaceTx->currentIndex());
 
-    // 加载地址信息
+    // 加载地址信息（简化：直接使用value()，如果不存在则使用空字符串，UI会保持默认值）
     ui->editSrcMac->setText(settings.value("config/src_mac", "").toString());
-    // dst_mac 的恢复逻辑：
-    // 1. 优先使用 config/dst_mac（最后一次关闭时的值）
-    // 2. 如果为空，则使用历史记录的第一个
-    // 3. 如果都没有，使用默认值
-    QString lastMac = settings.value("config/dst_mac", "").toString();
-    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
-
+    
+    // dst_mac 的恢复逻辑：优先使用保存的值，如果为空则尝试历史记录
     if (macCombo) {
-        // editDstMac 现在是 QComboBox
+        QString lastMac = settings.value("config/dst_mac", "").toString();
         if (!lastMac.isEmpty()) {
-            // 如果 config/dst_mac 有值，使用它（这是最后一次关闭时的值）
             macCombo->setEditText(lastMac);
         } else {
-            // 如果 config/dst_mac 为空，尝试从历史记录获取
+            // 如果保存的值为空，尝试从历史记录获取
             QStringList macHistory = settings.value("history/dst_mac").toStringList();
             if (!macHistory.isEmpty()) {
                 macCombo->setEditText(macHistory.first());
-            } else {
-                // 如果历史记录也为空，使用默认值
-                macCombo->setEditText("FF:FF:FF:FF:FF:FF");
             }
         }
     }
+    
     ui->editSrcIp->setText(settings.value("config/src_ip", "").toString());
     QString currentDstIp = settings.value("config/dst_ip_val", "").toString();
-    if (!currentDstIp.isEmpty()) ui->editDstIp->setEditText(currentDstIp);
+    if (!currentDstIp.isEmpty()) {
+        ui->editDstIp->setEditText(currentDstIp);
+    }
 
     // [修改核心] 加载协议类型 (0=ICMP, 1=UDP, 2=TCP, 3=DNS, 4=ARP)
+    // [修复] 暂时断开信号连接，避免触发onProtoToggled()导致配置被重置
+    ui->rbIcmp->blockSignals(true);
+    ui->rbUdp->blockSignals(true);
+    ui->rbTcp->blockSignals(true);
+    ui->rbDns->blockSignals(true);
+    ui->rbArp->blockSignals(true);
+    
+    // 简化：直接使用value()，默认值为0（ICMP）
     int proto = settings.value("config/protocol", 0).toInt();
+    
+    // [调试] 输出加载的协议类型（仅在Debug模式下）
+    #ifdef QT_DEBUG
+    qDebug() << "Loading protocol:" << proto;
+    #endif
+    
     switch (proto) {
         case 0:
             ui->rbIcmp->setChecked(true);
@@ -1582,17 +1764,31 @@ void MainWindow::loadConfig() {
             break;
         case 4:
             ui->rbArp->setChecked(true);
-            break; // [新增]
+            break;
     }
-
-    // 加载 TCP 标志位
+    
+    // 加载 TCP 标志位（在恢复信号连接之前，避免触发onProtoToggled()重置配置）
+    // 简化：直接使用value()，默认值为false
     ui->chkSyn->setChecked(settings.value("config/tcp_syn", false).toBool());
     ui->chkAck->setChecked(settings.value("config/tcp_ack", false).toBool());
     ui->chkPsh->setChecked(settings.value("config/tcp_psh", false).toBool());
     ui->chkFin->setChecked(settings.value("config/tcp_fin", false).toBool());
     ui->chkRst->setChecked(settings.value("config/tcp_rst", false).toBool());
+    
+    // [修复] 恢复信号连接（在所有配置加载完成后）
+    ui->rbIcmp->blockSignals(false);
+    ui->rbUdp->blockSignals(false);
+    ui->rbTcp->blockSignals(false);
+    ui->rbDns->blockSignals(false);
+    ui->rbArp->blockSignals(false);
 
     // 加载载荷模式
+    // [修复] 暂时断开信号连接，避免触发onPayloadModeChanged()导致配置被重置
+    ui->rbPayRandom->blockSignals(true);
+    ui->rbPayFixed->blockSignals(true);
+    ui->rbPayCustom->blockSignals(true);
+    
+    // 简化：直接使用value()，默认值为0（Random）
     int payMode = settings.value("config/payload_mode", 0).toInt();
     switch (payMode) {
         case 0:
@@ -1605,17 +1801,37 @@ void MainWindow::loadConfig() {
             ui->rbPayCustom->setChecked(true);
             break;
     }
-
-    // 加载其他参数
+    
+    // 简化：直接使用value()，提供合理的默认值
     ui->spinPktLen->setValue(settings.value("config/payload_len", 64).toInt());
     ui->spinFixVal->setValue(settings.value("config/fixed_val", 0).toInt());
     ui->editCustomData->setText(settings.value("config/custom_data", "").toString());
+    
+    // [修复] 恢复信号连接（在所有参数加载完成后）
+    ui->rbPayRandom->blockSignals(false);
+    ui->rbPayFixed->blockSignals(false);
+    ui->rbPayCustom->blockSignals(false);
+
+    // 加载其他参数（端口、间隔等）
+    // 简化：直接使用value()，提供合理的默认值
+    #ifdef QT_DEBUG
+    qDebug() << "Loading parameters...";
+    #endif
+    
+    // 使用UIConfig中的默认值
     ui->spinInterval->setValue(settings.value("config/interval", UIConfig::DEFAULT_INTERVAL_US).toInt());
     ui->spinSrcPort->setValue(settings.value("config/src_port", 10086).toInt());
     ui->spinDstPort->setValue(settings.value("config/dst_port", 10086).toInt());
     ui->editDomain->setText(settings.value("config/domain", "www.google.com").toString());
+    
+    #ifdef QT_DEBUG
+    qDebug() << "Loaded - interval:" << ui->spinInterval->value()
+             << "src_port:" << ui->spinSrcPort->value()
+             << "dst_port:" << ui->spinDstPort->value();
+    #endif
 
     // --- 加载右侧 OS Stack Sender 配置 ---
+    // 简化：直接使用value()，提供合理的默认值
 
     // Source Interface
     QString sockIface = settings.value("sock_config/source_iface", "").toString();
@@ -1641,12 +1857,67 @@ void MainWindow::loadConfig() {
         ui->rbSockUdp->setChecked(true);
     else
         ui->rbSockTcp->setChecked(true);
+    
+    // [新增] 恢复 Connect Flood 选项和随机化参数
+    ui->chkConnectFlood->setChecked(settings.value("sock_config/is_connect_only", false).toBool());
+    ui->chkSockRandPort->setChecked(settings.value("sock_config/random_src_port", false).toBool());
+    ui->chkSockRandMac->setChecked(settings.value("sock_config/random_src_mac", false).toBool());
+    ui->chkSockRandIp->setChecked(settings.value("sock_config/random_src_ip", false).toBool());
+    ui->chkSockRandSeq->setChecked(settings.value("sock_config/random_seq", false).toBool());
+    ui->spinSockSPort->setValue(settings.value("sock_config/source_port", 0).toInt());
+
+    ui->chkConnectFlood->setVisible(!ui->rbSockUdp->isChecked()); // 仅在非 UDP 时显示
+    ui->sockRandomContainer->setVisible(!ui->rbSockUdp->isChecked() && ui->chkConnectFlood->isChecked());
 
     // Payload Size
     ui->spinSockLen->setValue(settings.value("sock_config/payload_len", 60000).toInt());
 
     // Interval
     ui->spinSockInt->setValue(settings.value("sock_config/interval", UIConfig::DEFAULT_SOCKET_INTERVAL_US).toInt());
+
+    // ========================================================================
+    // 应用已加载的配置到UI（在所有配置值加载完成后）
+    // ========================================================================
+    
+    // 1. 更新UI显示状态（协议切换、载荷模式切换等）
+    // 注意：这些函数可能会重置某些配置值，所以需要在之后再次恢复
+    onProtoToggled();
+    onPayloadModeChanged();
+    
+    // 2. 恢复参数部分（端口、间隔等）
+    // 确保在调用onProtoToggled()和onPayloadModeChanged()之后，parameters的值仍然正确
+    // 简化：直接使用value()，提供合理的默认值
+    #ifdef QT_DEBUG
+    qDebug() << "Restoring parameters after UI updates...";
+    #endif
+    
+    ui->spinInterval->setValue(settings.value("config/interval", UIConfig::DEFAULT_INTERVAL_US).toInt());
+    ui->spinSrcPort->setValue(settings.value("config/src_port", 10086).toInt());
+    ui->spinDstPort->setValue(settings.value("config/dst_port", 10086).toInt());
+    
+    #ifdef QT_DEBUG
+    qDebug() << "Restored - interval:" << ui->spinInterval->value()
+             << "src_port:" << ui->spinSrcPort->value()
+             << "dst_port:" << ui->spinDstPort->value();
+    #endif
+    
+    // 5. 更新UI显示（在恢复所有配置值之后）
+    // 触发spinInterval的valueChanged信号以更新PPS标签显示
+    emit ui->spinInterval->valueChanged(ui->spinInterval->value());
+    
+    // 6. 强制更新所有控件的显示，确保值被正确显示
+    ui->spinInterval->update();
+    ui->spinSrcPort->update();
+    ui->spinDstPort->update();
+    
+    // [调试] 输出最终值确认（仅在Debug模式下）
+    #ifdef QT_DEBUG
+    qDebug() << "Final values - interval:" << ui->spinInterval->value()
+             << "src_port:" << ui->spinSrcPort->value()
+             << "dst_port:" << ui->spinDstPort->value();
+    #endif
+
+    m_isLoadingConfig = false; // [新增] 加载完成，清除标志
 }
 
 // ============================================================================
@@ -1655,12 +1926,50 @@ void MainWindow::loadConfig() {
 void MainWindow::saveConfig() {
     QSettings settings("PacketStorm", "SenderConfig");
 
+    // --- 1. 更新并保存历史记录 (IP 和 MAC) ---
+    // IP 历史
+    QString currentIp = ui->editDstIp->currentText();
+    if (!currentIp.isEmpty()) {
+        QStringList ipHistory = settings.value("history/dst_ip").toStringList();
+        ipHistory.removeAll(currentIp);
+        ipHistory.insert(0, currentIp);
+        while (ipHistory.size() > UIConfig::MAX_HISTORY_ITEMS) ipHistory.removeLast();
+        settings.setValue("history/dst_ip", ipHistory);
+        
+        // 刷新 UI 下拉列表
+        ui->editDstIp->blockSignals(true);
+        ui->editDstIp->clear();
+        ui->editDstIp->addItems(ipHistory);
+        ui->editDstIp->setEditText(currentIp);
+        ui->editDstIp->blockSignals(false);
+    }
+
+    // MAC 历史
+    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
+    QString currentMac = macCombo ? macCombo->currentText() : "";
+    QRegularExpression macRegex("^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$");
+    if (!currentMac.isEmpty() && macRegex.match(currentMac).hasMatch()) {
+        QStringList macHistory = settings.value("history/dst_mac").toStringList();
+        macHistory.removeAll(currentMac);
+        macHistory.insert(0, currentMac);
+        while (macHistory.size() > UIConfig::MAX_HISTORY_ITEMS) macHistory.removeLast();
+        settings.setValue("history/dst_mac", macHistory);
+        
+        // 刷新 UI 下拉列表
+        if (macCombo) {
+            macCombo->blockSignals(true);
+            macCombo->clear();
+            macCombo->addItems(macHistory);
+            macCombo->setEditText(currentMac);
+            macCombo->blockSignals(false);
+        }
+    }
+
     settings.setValue("window/geometry", saveGeometry());
 
     // 1. 保存底部三栏 (Log/Table/Hex) 的比例
-    QSplitter* splitterBot = ui->grpLog->findChild<QSplitter*>("splitterBottom");
-    if (splitterBot) {
-        settings.setValue("window/splitter_bottom_state", splitterBot->saveState());
+    if (ui->splitterBottom) {
+        settings.setValue("window/splitter_bottom_state", ui->splitterBottom->saveState());
     }
 
     // 2. 保存主垂直分割 (Top/Bottom) 的比例
@@ -1695,13 +2004,21 @@ void MainWindow::saveConfig() {
     else if (ui->rbArp->isChecked())
         proto = 4; // [新增]
     settings.setValue("config/protocol", proto);
+    
+    // [调试] 输出保存时的实际协议状态（仅在Debug模式下）
+    #ifdef QT_DEBUG
+    qDebug() << "Saving protocol:" << proto 
+             << "UDP:" << ui->rbUdp->isChecked()
+             << "TCP:" << ui->rbTcp->isChecked()
+             << "ICMP:" << ui->rbIcmp->isChecked();
+    #endif
 
     settings.setValue("config/tcp_syn", ui->chkSyn->isChecked());
     settings.setValue("config/tcp_ack", ui->chkAck->isChecked());
     settings.setValue("config/tcp_psh", ui->chkPsh->isChecked());
     settings.setValue("config/tcp_fin", ui->chkFin->isChecked());
     settings.setValue("config/tcp_rst", ui->chkRst->isChecked());
-
+    
     int payMode = 0;
     if (ui->rbPayFixed->isChecked())
         payMode = 1;
@@ -1716,6 +2033,13 @@ void MainWindow::saveConfig() {
     settings.setValue("config/src_port", ui->spinSrcPort->value());
     settings.setValue("config/dst_port", ui->spinDstPort->value());
     settings.setValue("config/domain", ui->editDomain->text());
+    
+    // [调试] 输出保存时的实际参数值（仅在Debug模式下）
+    #ifdef QT_DEBUG
+    qDebug() << "Saving parameters - interval:" << ui->spinInterval->value()
+             << "src_port:" << ui->spinSrcPort->value()
+             << "dst_port:" << ui->spinDstPort->value();
+    #endif
 
     // --- 保存右侧 OS Stack Sender 配置 ---
 
@@ -1723,122 +2047,30 @@ void MainWindow::saveConfig() {
     settings.setValue("sock_config/target_ip", ui->editSockIp->text());
     settings.setValue("sock_config/target_port", ui->spinSockPort->value());
     settings.setValue("sock_config/is_udp", ui->rbSockUdp->isChecked());
+    
+    // [新增] 保存 Connect Flood 选项和随机化参数
+    settings.setValue("sock_config/is_connect_only", ui->chkConnectFlood->isChecked());
+    settings.setValue("sock_config/random_src_port", ui->chkSockRandPort->isChecked());
+    settings.setValue("sock_config/random_src_mac", ui->chkSockRandMac->isChecked());
+    settings.setValue("sock_config/random_src_ip", ui->chkSockRandIp->isChecked());
+    settings.setValue("sock_config/random_seq", ui->chkSockRandSeq->isChecked());
+    settings.setValue("sock_config/source_port", ui->spinSockSPort->value());
+    
     settings.setValue("sock_config/payload_len", ui->spinSockLen->value());
     settings.setValue("sock_config/interval", ui->spinSockInt->value());
-}
-
-// ============================================================================
-// 加载历史记录 (启动时调用)
-// ============================================================================
-void MainWindow::loadHistory() {
-    QSettings settings("PacketStorm", "SenderConfig");
-
-    // 读取保存的列表
-    QStringList history = settings.value("history/dst_ip").toStringList();
-
-    ui->editDstIp->clear();
-    if (!history.isEmpty()) {
-        ui->editDstIp->addItems(history);
-        // 默认选中最近的一个
-        ui->editDstIp->setCurrentIndex(0);
-    } else {
-        // 如果没有历史，给个默认值
-        ui->editDstIp->setEditText("192.168.1.1");
-    }
-}
-
-// ============================================================================
-// 保存历史记录 (点击发送时调用)
-// ============================================================================
-void MainWindow::saveHistory(const QString& ip) {
-    if (ip.isEmpty()) return;
-
-    QSettings settings("PacketStorm", "SenderConfig");
-    QStringList history = settings.value("history/dst_ip").toStringList();
-
-    // 1. 去重：移除已存在的相同项，并移除空项
-    history.removeAll(ip);
-    history.removeAll("");
-
-    // 2. 插入：将当前 IP 插入到最前面 (最近使用的排第一)
-    history.insert(0, ip);
-
-    // 3. 限制：只保留最近 N 条
-    while (history.size() > UIConfig::MAX_HISTORY_ITEMS) {
-        history.removeLast();
-    }
-
-    // 4. 保存回磁盘
-    settings.setValue("history/dst_ip", history);
-
-    // 5. 刷新 UI 下拉列表（保持当前输入框内容不变）
-    ui->editDstIp->blockSignals(true); // 暂停信号，防止触发 currentIndexChanged
-    ui->editDstIp->clear();
-    ui->editDstIp->addItems(history);
-    ui->editDstIp->setEditText(ip); // 恢复当前显示的文本
-    ui->editDstIp->blockSignals(false);
-}
-
-// ============================================================================
-// 加载 MAC 历史记录 (启动时调用)
-// ============================================================================
-void MainWindow::loadMacHistory() {
-    QSettings settings("PacketStorm", "SenderConfig");
-
-    // 读取保存的 MAC 历史列表
-    QStringList history = settings.value("history/dst_mac").toStringList();
-
-    // editDstMac 现在是 QComboBox，填充历史记录下拉列表
-    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
-    if (macCombo) {
-        macCombo->clear();
-        if (!history.isEmpty()) {
-            macCombo->addItems(history);
-            // 不在这里设置当前值，让 loadConfig() 来设置（优先使用 config/dst_mac）
-        }
-        // 如果历史记录为空，保持为空，让 loadConfig() 设置默认值
-    }
-}
-
-// ============================================================================
-// 保存 MAC 历史记录 (点击发送时调用)
-// ============================================================================
-void MainWindow::saveMacHistory(const QString& mac) {
-    if (mac.isEmpty()) return;
-
-    // 验证 MAC 地址格式
-    QRegularExpression macRegex("^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$");
-    if (!macRegex.match(mac).hasMatch()) {
-        return; // 格式不正确，不保存
-    }
-
-    QSettings settings("PacketStorm", "SenderConfig");
-    QStringList history = settings.value("history/dst_mac").toStringList();
-
-    // 1. 去重：移除已存在的相同项，并移除空项
-    history.removeAll(mac);
-    history.removeAll("");
-
-    // 2. 插入：将当前 MAC 插入到最前面 (最近使用的排第一)
-    history.insert(0, mac);
-
-    // 3. 限制：只保留最近 N 条
-    while (history.size() > UIConfig::MAX_HISTORY_ITEMS) {
-        history.removeLast();
-    }
-
-    // 4. 保存回磁盘
-    settings.setValue("history/dst_mac", history);
-
-    // 5. 如果是 QComboBox，刷新下拉列表
-    QComboBox* macCombo = qobject_cast<QComboBox*>(ui->editDstMac);
-    if (macCombo) {
-        macCombo->blockSignals(true);
-        macCombo->clear();
-        macCombo->addItems(history);
-        macCombo->setEditText(mac); // 恢复当前显示的文本
-        macCombo->blockSignals(false);
-    }
+    
+    // [修复] 确保所有配置都被同步保存到磁盘
+    settings.sync();
+    
+    // [调试] 验证保存的配置（仅在Debug模式下）
+    #ifdef QT_DEBUG
+    int savedProto = settings.value("config/protocol", -1).toInt();
+    int savedSrcPort = settings.value("config/src_port", -1).toInt();
+    int savedDstPort = settings.value("config/dst_port", -1).toInt();
+    qDebug() << "Config saved successfully - protocol:" << savedProto 
+             << "src_port:" << savedSrcPort 
+             << "dst_port:" << savedDstPort;
+    #endif
 }
 
 // ============================================================================

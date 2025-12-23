@@ -292,6 +292,7 @@ class MainWindow : public QMainWindow {
     MainWindow(QWidget* parent = nullptr);
     ~MainWindow();
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void closeEvent(QCloseEvent* event) override; // [新增] 窗口关闭事件处理
 
   private slots:
     void onStartSendClicked();
@@ -307,10 +308,6 @@ class MainWindow : public QMainWindow {
 
   private:
     void loadInterfaces();
-    void loadHistory();
-    void saveHistory(const QString& ip);
-    void loadMacHistory();
-    void saveMacHistory(const QString& mac);
     void loadConfig();
     void saveConfig();
     void setupResourceMonitor();
@@ -325,6 +322,10 @@ class MainWindow : public QMainWindow {
 
     void setupTrafficTable();
     void addPacketToTable(const QByteArray& data);
+
+    // [新增] 辅助解析函数
+    void parseMac(const QString& s, unsigned char* buf);
+    void parseIp(const QString& s, unsigned char* buf);
 
     HexRenderDelegate* m_hexDelegate;
 
@@ -396,4 +397,5 @@ class MainWindow : public QMainWindow {
     QLabel* m_packetsLabel;                   // 已发包数量（文本标签）
     QLabel* m_bytesLabel;                     // 已发送字节（文本标签）
     QWidget* m_resourceContainer;
+    bool m_isLoadingConfig = false; // [新增] 是否正在加载配置的标志
 };

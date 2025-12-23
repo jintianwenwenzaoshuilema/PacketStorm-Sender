@@ -9,3 +9,7 @@ CMakeLists.txt.user
 # === Build Folders ===
 build/
 .vscode/
+
+# === Markdown Files (except README.md) ===
+*.md
+!README.md
