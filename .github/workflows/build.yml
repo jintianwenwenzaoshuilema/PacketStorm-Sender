@@ -26,21 +26,29 @@ jobs:
       - name: Set up MinGW
         shell: pwsh
         run: |
-          # 根据日志，IQTA_TOOLS 已经指向了 Tools 目录
           $tools_dir = $env:IQTA_TOOLS
-          if (-not $tools_dir) {
-              # 如果 IQTA_TOOLS 为空，尝试从 Qt6_DIR 推导
-              if ($env:Qt6_DIR) {
-                  $qt_version_dir = Split-Path $env:Qt6_DIR -Parent
-                  $qt_base_dir = Split-Path $qt_version_dir -Parent
-                  $tools_dir = Join-Path $qt_base_dir "Tools"
-              }
+          if (-not $tools_dir -and $env:Qt6_DIR) {
+              $qt_version_dir = Split-Path $env:Qt6_DIR -Parent
+              $qt_base_dir = Split-Path $qt_version_dir -Parent
+              $tools_dir = Join-Path $qt_base_dir "Tools"
           }
           
           echo "Searching for MinGW in: $tools_dir"
           
           if ($tools_dir -and (Test-Path $tools_dir)) {
-              $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*" | Select-Object -First 1
+              # 优先选择带版本号的 64 位目录（如 mingw1310_64），这些通常是较新的版本
+              $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*" | 
+                            Where-Object { $_.PSIsContainer -and $_.Name -match "mingw\d+.*_64" } | 
+                            Sort-Object Name -Descending | 
+                            Select-Object -First 1
+              
+              if (-not $mingw_path) {
+                  # 兜底：选择任何名字匹配 mingw 的目录
+                  $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*" | 
+                                Where-Object { $_.PSIsContainer } | 
+                                Select-Object -First 1
+              }
+
               if ($mingw_path) {
                   $bin_path = Join-Path $mingw_path.FullName "bin"
                   echo "Found MinGW: $bin_path"
@@ -50,7 +58,7 @@ jobs:
                   exit 1
               }
           } else {
-              echo "Error: Tools directory not found. Environment: IQTA_TOOLS=$env:IQTA_TOOLS, Qt6_DIR=$env:Qt6_DIR"
+              echo "Error: Tools directory not found."
               exit 1
           }
 
