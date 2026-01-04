@@ -1,0 +1,57 @@
+name: Build and Package EXE
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.8.2'
+          arch: 'win64_mingw'
+          modules: 'qtcharts'
+
+      - name: Download WinPcap SDK (WpdPack)
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://www.winpcap.org/install/bin/WpdPack_4_1_2.zip" -OutFile "WpdPack.zip"
+          Expand-Archive -Path "WpdPack.zip" -DestinationPath "C:\"
+          # 检查解压后的目录名并重命名为 C:\WpdPack 以匹配 .pro 文件
+          if (Test-Path "C:\WpdPack_4_1_2") {
+              if (Test-Path "C:\WpdPack") { Remove-Item -Recurse -Force "C:\WpdPack" }
+              Move-Item -Path "C:\WpdPack_4_1_2" -Destination "C:\WpdPack"
+          }
+
+      - name: Build Project
+        shell: pwsh
+        run: |
+          mkdir build
+          cd build
+          qmake ..\PacketStorm_Sender.pro
+          mingw32-make -j2 release
+
+      - name: Prepare Deployment
+        shell: pwsh
+        run: |
+          mkdir deploy
+          copy build\release\PacketStorm_Sender.exe deploy\
+          # windeployqt 自动拷贝 Qt 依赖库
+          windeployqt --release --no-translations --compiler-runtime deploy\PacketStorm_Sender.exe
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PacketStorm_Sender_Release
+          path: deploy/
+
