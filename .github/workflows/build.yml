@@ -26,15 +26,28 @@ jobs:
       - name: Set up MinGW
         shell: pwsh
         run: |
-          $qt_root = $env:QT_ROOT_DIR
-          $mingw_path = Get-ChildItem -Path "$qt_root\..\..\Tools" -Filter "mingw*" | Select-Object -First 1
-          if ($mingw_path) {
-              $bin_path = Join-Path $mingw_path.FullName "bin"
-              echo "Found MinGW: $bin_path"
-              echo "$bin_path" >> $env:GITHUB_PATH
+          echo "QT_ROOT_DIR is: $env:QT_ROOT_DIR"
+          # 使用 Split-Path 安全地获取上级目录
+          # 假设结构是 .../Qt/6.8.2/mingw_64，我们需要回到 .../Qt/
+          $qt_version_dir = Split-Path $env:QT_ROOT_DIR -Parent
+          $qt_base_dir = Split-Path $qt_version_dir -Parent
+          $tools_dir = Join-Path $qt_base_dir "Tools"
+          
+          echo "Searching for MinGW in: $tools_dir"
+          
+          if (Test-Path $tools_dir) {
+              $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*" | Select-Object -First 1
+              if ($mingw_path) {
+                  $bin_path = Join-Path $mingw_path.FullName "bin"
+                  echo "Found MinGW: $bin_path"
+                  echo "$bin_path" >> $env:GITHUB_PATH
+              } else {
+                  echo "Error: MinGW folder not found in $tools_dir"
+                  exit 1
+              }
           } else {
-              echo "MinGW not found in Tools, trying default path"
-              "C:\Qt\Tools\mingw1310_64\bin" >> $env:GITHUB_PATH
+              echo "Error: Tools directory not found at $tools_dir"
+              exit 1
           }
 
       - name: Download WinPcap SDK (WpdPack)
