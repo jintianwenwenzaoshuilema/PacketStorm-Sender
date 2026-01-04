@@ -21,7 +21,7 @@ jobs:
           version: '6.8.3'
           arch: 'win64_mingw'
           modules: 'qtcharts'
-          tools: 'tools_mingw'
+          tools: 'tools_mingw1310'
 
       - name: Set up MinGW
         shell: pwsh
@@ -34,15 +34,17 @@ jobs:
           }
           
           echo "Searching for MinGW in: $tools_dir"
+          # 打印目录内容，方便排查
+          Get-ChildItem -Path $tools_dir
           
           if ($tools_dir -and (Test-Path $tools_dir)) {
               # 优先搜索 mingw1310_64
               $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw1310_64" | Where-Object { $_.PSIsContainer } | Select-Object -First 1
               
               if (-not $mingw_path) {
-                  # 备选：搜索任何 mingw*64
+                  # 备选：搜索任何较新的 mingw*64
                   $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*_64" | 
-                                Where-Object { $_.PSIsContainer } | 
+                                Where-Object { $_.PSIsContainer -and $_.Name -ge "mingw11" } | 
                                 Sort-Object Name -Descending | 
                                 Select-Object -First 1
               }
