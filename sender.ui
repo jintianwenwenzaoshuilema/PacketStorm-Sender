@@ -16,7 +16,7 @@
         <property name="styleSheet">
             <string notr="true">
                 /* 全局配置 */
-                * { font-family: &quot;JetBrains Mono&quot;, &quot;Consolas&quot;, monospace;
+                * { font-family: "JetBrains Mono", "Consolas", monospace;
                 font-size: 13px; color: #a0a8b7; }
                 QMainWindow, QWidget { background-color: #0b0f19; }
 
@@ -51,17 +51,23 @@
                 background-color: rgba(255, 255, 255, 0.05); border: 1px solid #2d3748; }
                 QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); border-color:
                 #a0a8b7; }
-                QPushButton#btnStartSend { background-color: rgba(0, 230, 118, 0.1); border: 1px
-                solid #00e676; color: #00e676; padding: 12px; font-size: 14px; }
-                QPushButton#btnStartSend:hover { background-color: rgba(0, 230, 118, 0.3); color:
-                #ffffff; }
-                QPushButton#btnStartSend:disabled { border-color: #2d3748; color: #4a5568;
-                background-color: transparent; }
-                QPushButton#btnStopSend { background-color: rgba(255, 23, 68, 0.1); border: 1px
-                solid #ff1744; color: #ff1744; padding: 12px; font-size: 14px; }
-                QPushButton#btnStopSend:hover { background-color: #ff1744; color: #ffffff; }
-                QPushButton#btnStopSend:disabled { border-color: #2d3748; color: #4a5568;
-                background-color: transparent; }
+                QPushButton#btnPktAddTask, QPushButton#btnSockAddTask, QPushButton#btnPktAddStartTask, QPushButton#btnSockAddStartTask, QPushButton#btnStartAll, QPushButton#btnStopAll, QPushButton#btnClearAll { 
+                    min-height: 38px;
+                    max-height: 38px;
+                    padding: 4px; 
+                    font-size: 13px;
+                    border-radius: 4px;
+                }
+
+                QPushButton#btnPktAddTask, QPushButton#btnSockAddTask { 
+                    background-color: rgba(79, 209, 197, 0.1); border: 1px solid #4FD1C5; color: #4FD1C5; 
+                }
+                QPushButton#btnPktAddTask:hover, QPushButton#btnSockAddTask:hover { background-color: rgba(79, 209, 197, 0.2); border-color: #4FD1C5; color: white; }
+
+                QPushButton#btnPktAddStartTask, QPushButton#btnSockAddStartTask { 
+                    background-color: rgba(0, 230, 118, 0.1); border: 1px solid #00e676; color: #00e676; 
+                }
+                QPushButton#btnPktAddStartTask:hover, QPushButton#btnSockAddStartTask:hover { background-color: rgba(0, 230, 118, 0.2); border-color: #00e676; color: white; }
 
                 /* 复选/单选 */
                 QRadioButton, QCheckBox { spacing: 8px; color: #a0a8b7; background-color:
@@ -89,6 +95,71 @@
                 QSplitter::handle:pressed {
                 background-color: rgba(0, 230, 118, 0.5); /* 按下拖动时显示半透明绿色 */
                 }
+
+                /* Task Manager Styles */
+                QGroupBox#taskManager { min-width: 400px; }
+                QScrollArea#taskScrollArea { border: none; background: transparent; }
+                QScrollArea#taskScrollArea QScrollBar:vertical { width: 8px; background: #0b0f19; border-radius: 4px; }
+                QScrollArea#taskScrollArea QScrollBar::handle:vertical { background: #1c2333; border-radius: 4px; min-height: 20px; }
+                QScrollArea#taskScrollArea QScrollBar::handle:vertical:hover { background: #2d3748; }
+
+                /* Global Control Buttons */
+                QPushButton#btnStartAll { color: #00e676; border-color: rgba(0,230,118,0.3); }
+                QPushButton#btnStartAll:hover { border-color: #00e676; background: rgba(0,230,118,0.15); color: white; }
+                QPushButton#btnStopAll { color: #ff1744; border-color: rgba(255,23,68,0.3); }
+                QPushButton#btnStopAll:hover { border-color: #ff1744; background: rgba(255,23,68,0.15); color: white; }
+                QPushButton#btnClearAll { color: #00f0ff; border-color: rgba(0,240,255,0.3); }
+                QPushButton#btnClearAll:hover { border-color: #00f0ff; background: rgba(0,240,255,0.15); color: white; }
+
+                /* Task Card Styles */
+                QWidget#taskCard { background: #0f121a; border: 1px solid #1c2333; border-radius: 4px; }
+                QWidget#taskCard:hover { border-color: #2d3748; background: #151926; }
+                QWidget#taskCard QLabel { border: none; color: #a0a8b7; }
+
+                /* Task Action Buttons */
+                QPushButton#btnTaskStart { background: rgba(0,230,118,0.1); color: #00e676; border: 1px solid rgba(0,230,118,0.5); border-radius: 2px; font-size: 12px; padding: 0px; }
+                QPushButton#btnTaskStart:hover { background: #00e676; color: white; }
+                QPushButton#btnTaskStop { background: rgba(255,23,68,0.1); color: #ff1744; border: 1px solid rgba(255,23,68,0.5); border-radius: 2px; font-size: 12px; padding: 0px; }
+                QPushButton#btnTaskStop:hover { background: #ff1744; color: white; }
+                QPushButton#btnTaskDelete { background: rgba(113,128,150,0.1); color: #718096; border: 1px solid #2d3748; border-radius: 2px; font-size: 11px; padding: 0px; }
+                QPushButton#btnTaskDelete:hover { background: #4a5568; color: white; }
+
+                /* Labels inside card */
+                QLabel#lblProtoWinPcap { color: #00f0ff; font-weight: bold; font-size: 12px; }
+                QLabel#lblProtoSocket { color: #e040fb; font-weight: bold; font-size: 12px; }
+                QLabel#lblTargetSmall { color: #718096; font-size: 10px; }
+                QLabel#lblStatsSmall { color: #a0a8b7; font-size: 11px; font-family: 'JetBrains Mono'; }
+
+                /* Resource Monitor Container */
+                QWidget#resourceContainer { background: transparent; border-top: 1px solid #1c2333; }
+                QLabel#lblStatsTitle { color: #4a5568; font-size: 9px; font-weight: bold; letter-spacing: 1px; }
+                QLabel#lblPacketsTotal { color: #00e676; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono'; }
+                QLabel#lblBytesTotal { color: #00bcd4; font-size: 13px; font-weight: bold; font-family: 'JetBrains Mono'; }
+
+                /* Additional Styles */
+                QStatusBar { background: #0f121a; color: #718096; border-top: 1px solid #1c2333; }
+                QStatusBar::item { border: none; }
+                QChartView { background: transparent; }
+                QLabel#lblTargetPPS { color: #FFB74D; font-size: 11px; }
+                
+                QTableView#tablePackets, QTableWidget#tableHex {
+                    background-color: #050505; color: #a0a8b7; gridline-color: #1c2333; 
+                    border: 1px solid #1c2333; font-family: "JetBrains Mono"; font-size: 11px;
+                }
+                QTableView#tablePackets::item:selected { background-color: #00e676; color: #000000; }
+                QTableWidget#tableHex::item:selected { background-color: #00f0ff; color: #000000; }
+
+                /* 表头深色样式 */
+                QHeaderView::section { 
+                    background-color: #1a1d26; color: #a0a8b7; 
+                    padding: 4px; border: 1px solid #1c2333;
+                    font-weight: bold;
+                }
+                QHeaderView { background-color: #0f121a; border: none; }
+                QTableCornerButton::section { background-color: #1a1d26; border: 1px solid #1c2333; }
+
+                /* ARP Mode SpinBox */
+                QSpinBox#spinPktLen[arpMode="true"] { background-color: #1a202c; color: #718096; border: 1px dashed #2d3748; }
             </string>
         </property>
         <widget class="QWidget" name="centralwidget">
@@ -477,7 +548,7 @@
                                                                 <number>10</number>
                                                             </property>
                                                             <property name="topMargin">
-                                                                <number>10</number>
+                                                                <number>15</number>
                                                             </property>
                                                             <property name="rightMargin">
                                                                 <number>10</number>
@@ -515,84 +586,61 @@
                                                                             </property>
                                                                         </widget>
                                                                     </item>
-                                                                    <item>
-                                                                        <spacer name="spacerPayMode">
-                                                                            <property
-                                                                                name="orientation">
-                                                                                <enum>
-                                                                                    Qt::Orientation::Horizontal</enum>
-                                                                            </property>
-                                                                            <property
-                                                                                name="sizeHint"
-                                                                                stdset="0">
-                                                                                <size>
-                                                                                    <width>40</width>
-                                                                                    <height>20</height>
-                                                                                </size>
-                                                                            </property>
-                                                                        </spacer>
-                                                                    </item>
                                                                 </layout>
                                                             </item>
                                                             <item>
-                                                                <layout class="QHBoxLayout"
-                                                                    name="hlPayDetail">
-                                                                    <item>
+                                                                <layout class="QFormLayout"
+                                                                    name="formPayload">
+                                                                    <item row="0" column="0">
                                                                         <widget class="QLabel"
-                                                                            name="lblLen">
+                                                                            name="lblPktLen">
                                                                             <property name="text">
                                                                                 <string>Len:</string>
                                                                             </property>
                                                                         </widget>
                                                                     </item>
-                                                                    <item>
+                                                                    <item row="0" column="1">
                                                                         <widget class="QSpinBox"
                                                                             name="spinPktLen">
+                                                                            <property name="minimum">
+                                                                                <number>1</number>
+                                                                            </property>
                                                                             <property name="maximum">
-                                                                                <number>65500</number>
+                                                                                <number>1500</number>
                                                                             </property>
                                                                             <property name="value">
                                                                                 <number>64</number>
                                                                             </property>
                                                                         </widget>
                                                                     </item>
-                                                                    <item>
+                                                                    <item row="1" column="0">
                                                                         <widget class="QLabel"
                                                                             name="lblFixVal">
                                                                             <property name="text">
-                                                                                <string>Val(Hex):</string>
+                                                                                <string>Val:</string>
                                                                             </property>
                                                                         </widget>
                                                                     </item>
-                                                                    <item>
+                                                                    <item row="1" column="1">
                                                                         <widget class="QSpinBox"
                                                                             name="spinFixVal">
-                                                                            <property name="prefix">
-                                                                                <string>0x</string>
+                                                                            <property name="displayIntegerBase">
+                                                                                <number>16</number>
                                                                             </property>
                                                                             <property name="maximum">
                                                                                 <number>255</number>
                                                                             </property>
-                                                                            <property
-                                                                                name="displayIntegerBase">
-                                                                                <number>16</number>
-                                                                            </property>
-                                                                        </widget>
-                                                                    </item>
-                                                                    <item>
-                                                                        <widget class="QLineEdit"
-                                                                            name="editCustomData">
-                                                                            <property name="visible">
-                                                                                <bool>false</bool>
-                                                                            </property>
-                                                                            <property
-                                                                                name="placeholderText">
-                                                                                <string>Enter text
-                                                                                    payload...</string>
-                                                                            </property>
                                                                         </widget>
                                                                     </item>
                                                                 </layout>
+                                                            </item>
+                                                            <item>
+                                                                <widget class="QLineEdit"
+                                                                    name="editCustomData">
+                                                                    <property name="placeholderText">
+                                                                        <string>Custom Payload (UTF-8)...</string>
+                                                                    </property>
+                                                                </widget>
                                                             </item>
                                                         </layout>
                                                     </widget>
@@ -611,18 +659,21 @@
                                                             <widget class="QSpinBox"
                                                                 name="spinInterval">
                                                                 <property name="maximum">
-                                                                    <number>10000000</number>
+                                                                    <number>1000000</number>
                                                                 </property>
                                                                 <property name="singleStep">
                                                                     <number>1000</number>
                                                                 </property>
                                                                 <property name="value">
-                                                                    <number>10000</number>
+                                                                    <number>100000</number>
                                                                 </property>
                                                             </widget>
                                                         </item>
                                                         <item row="1" column="0">
                                                             <widget class="QLabel" name="lblSPort">
+                                                                <property name="enabled">
+                                                                    <bool>false</bool>
+                                                                </property>
                                                                 <property name="text">
                                                                     <string>Src Port:</string>
                                                                 </property>
@@ -684,49 +735,37 @@
                                     <item>
                                         <layout class="QHBoxLayout" name="hlBtnTx">
                                             <item>
-                                                <widget class="QPushButton" name="btnStartSend">
+                                                <widget class="QPushButton" name="btnPktAddTask">
                                                     <property name="minimumSize">
                                                         <size>
                                                             <width>0</width>
-                                                            <height>50</height>
+                                                            <height>38</height>
                                                         </size>
                                                     </property>
                                                     <property name="text">
-                                                        <string>START SENDING</string>
+                                                        <string>Add Task</string>
                                                     </property>
                                                 </widget>
                                             </item>
                                             <item>
-                                                <widget class="QPushButton" name="btnStopSend">
+                                                <widget class="QPushButton" name="btnPktAddStartTask">
                                                     <property name="enabled">
-                                                        <bool>false</bool>
+                                                        <bool>true</bool>
                                                     </property>
                                                     <property name="minimumSize">
                                                         <size>
                                                             <width>0</width>
-                                                            <height>50</height>
+                                                            <height>38</height>
                                                         </size>
                                                     </property>
                                                     <property name="text">
-                                                        <string>STOP</string>
+                                                        <string>Add Start</string>
                                                     </property>
                                                 </widget>
                                             </item>
                                         </layout>
                                     </item>
                                 </layout>
-                            </widget>
-
-                            <widget class="QGroupBox" name="grpChart">
-                                <property name="minimumSize">
-                                    <size>
-                                        <width>300</width>
-                                        <height>0</height>
-                                    </size>
-                                </property>
-                                <property name="title">
-                                    <string>Traffic Monitor</string>
-                                </property>
                             </widget>
 
                             <widget class="QGroupBox" name="grpSocketSender">
@@ -850,7 +889,7 @@
                                                 <string notr="true">color: #FFB74D; font-weight: bold;</string>
                                             </property>
                                             <property name="text">
-                                                <string>Connect &amp; Close Mode (Full Handshake)</string>
+                                                <string>Connect + Close Mode (Full Handshake)</string>
                                             </property>
                                             <property name="toolTip">
                                                 <string>建立完整的TCP三次握手后立即断开，形成完整的生命周期。
@@ -985,59 +1024,150 @@
                                     <item>
                                         <layout class="QHBoxLayout" name="hlBtnSock">
                                             <item>
-                                                <widget class="QPushButton" name="btnSockStart">
+                                                <widget class="QPushButton" name="btnSockAddTask">
                                                     <property name="minimumSize">
                                                         <size>
                                                             <width>0</width>
-                                                            <height>50</height>
+                                                            <height>38</height>
                                                         </size>
                                                     </property>
                                                     <property name="text">
-                                                        <string>OS SEND</string>
-                                                    </property>
-                                                    <property name="styleSheet">
-                                                        <string notr="true">QPushButton {
-                                                            background-color: rgba(213, 0, 249,
-                                                            0.1); border: 1px solid #d500f9; color:
-                                                            #d500f9; font-weight: bold; }
-                                                            QPushButton:hover { background-color:
-                                                            #d500f9; color: white; }
-                                                            QPushButton:disabled { border-color:
-                                                            #4a5568; color: #4a5568; background:
-                                                            transparent; }</string>
+                                                        <string>Add Task</string>
                                                     </property>
                                                 </widget>
                                             </item>
                                             <item>
-                                                <widget class="QPushButton" name="btnSockStop">
+                                                <widget class="QPushButton" name="btnSockAddStartTask">
                                                     <property name="enabled">
-                                                        <bool>false</bool>
+                                                        <bool>true</bool>
                                                     </property>
                                                     <property name="minimumSize">
                                                         <size>
                                                             <width>0</width>
-                                                            <height>50</height>
+                                                            <height>38</height>
                                                         </size>
                                                     </property>
                                                     <property name="text">
-                                                        <string>STOP</string>
-                                                    </property>
-                                                    <property name="styleSheet">
-                                                        <string notr="true">QPushButton {
-                                                            background-color: rgba(255, 23, 68,
-                                                            0.1); border: 1px solid #ff1744; color:
-                                                            #ff1744; font-weight: bold; }
-                                                            QPushButton:hover { background-color:
-                                                            #ff1744; color: white; }
-                                                            QPushButton:disabled { border-color:
-                                                            #4a5568; color: #4a5568; background:
-                                                            transparent; }</string>
+                                                        <string>Add Start</string>
                                                     </property>
                                                 </widget>
                                             </item>
                                         </layout>
                                     </item>
                                 </layout>
+                            </widget>
+
+                            <widget class="QGroupBox" name="taskManager">
+                                <property name="minimumSize">
+                                    <size>
+                                        <width>300</width>
+                                        <height>0</height>
+                                    </size>
+                                </property>
+                                <property name="title">
+                                    <string>Task Manager</string>
+                                </property>
+                                <layout class="QVBoxLayout" name="verticalLayout_TaskManager">
+                                    <property name="spacing">
+                                        <number>5</number>
+                                    </property>
+                                    <property name="leftMargin">
+                                        <number>2</number>
+                                    </property>
+                                    <property name="topMargin">
+                                        <number>15</number>
+                                    </property>
+                                    <property name="rightMargin">
+                                        <number>2</number>
+                                    </property>
+                                    <property name="bottomMargin">
+                                        <number>5</number>
+                                    </property>
+                                    <item>
+                                        <widget class="QScrollArea" name="taskScrollArea">
+                                            <property name="widgetResizable">
+                                                <bool>true</bool>
+                                            </property>
+                                            <property name="frameShape">
+                                                <enum>QFrame::NoFrame</enum>
+                                            </property>
+                                            <widget class="QWidget" name="taskContainer">
+                                                <layout class="QVBoxLayout" name="taskContainerLayout">
+                                                    <property name="spacing">
+                                                        <number>8</number>
+                                                    </property>
+                                                    <property name="leftMargin">
+                                                        <number>5</number>
+                                                    </property>
+                                                    <property name="topMargin">
+                                                        <number>5</number>
+                                                    </property>
+                                                    <property name="rightMargin">
+                                                        <number>5</number>
+                                                    </property>
+                                                    <property name="bottomMargin">
+                                                        <number>5</number>
+                                                    </property>
+                                                </layout>
+                                            </widget>
+                                        </widget>
+                                    </item>
+                                    <item>
+                                        <layout class="QHBoxLayout" name="hlTaskManagerBtns">
+                                            <item>
+                                                <widget class="QPushButton" name="btnStartAll">
+                                                    <property name="minimumSize">
+                                                        <size>
+                                                            <width>0</width>
+                                                            <height>38</height>
+                                                        </size>
+                                                    </property>
+                                                    <property name="text">
+                                                        <string>Start All</string>
+                                                    </property>
+                                                </widget>
+                                            </item>
+                                            <item>
+                                                <widget class="QPushButton" name="btnStopAll">
+                                                    <property name="minimumSize">
+                                                        <size>
+                                                            <width>0</width>
+                                                            <height>38</height>
+                                                        </size>
+                                                    </property>
+                                                    <property name="text">
+                                                        <string>Stop All</string>
+                                                    </property>
+                                                </widget>
+                                            </item>
+                                            <item>
+                                                <widget class="QPushButton" name="btnClearAll">
+                                                    <property name="minimumSize">
+                                                        <size>
+                                                            <width>0</width>
+                                                            <height>38</height>
+                                                        </size>
+                                                    </property>
+                                                    <property name="text">
+                                                        <string>Clear All</string>
+                                                    </property>
+                                                </widget>
+                                            </item>
+                                        </layout>
+                                    </item>
+                                </layout>
+                            </widget>
+
+                            <widget class="QGroupBox" name="grpChart">
+                                <property name="minimumSize">
+                                    <size>
+                                        <width>300</width>
+                                        <height>0</height>
+                                    </size>
+                                </property>
+                                <property name="title">
+                                    <string>Traffic Monitor</string>
+                                </property>
                             </widget>
                         </widget>
 
@@ -1103,8 +1233,9 @@
                                                             <string>System Logs</string>
                                                         </property>
                                                         <property name="styleSheet">
-                                                            <string notr="true">color: #718096;
-                                                                font-weight: bold; font-size: 11px;</string>
+                                                            <string notr="true">color: #00e676;
+                                                                font-weight: bold; font-size:
+                                                                11px;</string>
                                                         </property>
                                                     </widget>
                                                 </item>
@@ -1115,10 +1246,10 @@
                                                         </property>
                                                         <property name="styleSheet">
                                                             <string notr="true">background-color:
-                                                                #080a10; color: #a0a8b7; border: 1px
-                                                                solid #1c2333; font-family:
-                                                                &quot;JetBrains Mono&quot;;
-                                                                font-size: 10px;</string>
+                                                                #050505; color: #a0a8b7; border:
+                                                                1px solid #1c2333; font-family:
+                                                                "Consolas", monospace; font-size:
+                                                                11px;</string>
                                                         </property>
                                                     </widget>
                                                 </item>
@@ -1127,7 +1258,7 @@
 
                                         <widget class="QWidget" name="containerTable">
                                             <layout class="QVBoxLayout"
-                                                name="verticalLayout_MidTable">
+                                                name="verticalLayout_RightTable">
                                                 <property name="spacing">
                                                     <number>5</number>
                                                 </property>
@@ -1144,7 +1275,7 @@
                                                     <number>0</number>
                                                 </property>
                                                 <item>
-                                                    <layout class="QHBoxLayout" name="hlTableTools">
+                                                    <layout class="QHBoxLayout" name="hlTableTitle">
                                                         <item>
                                                             <widget class="QLabel"
                                                                 name="lblTableTitle">
@@ -1153,8 +1284,8 @@
                                                                 </property>
                                                                 <property name="styleSheet">
                                                                     <string notr="true">color:
-                                                                        #00e676; font-weight: bold;
-                                                                        font-size: 11px;</string>
+                                                                        #00e676; font-weight:
+                                                                        bold; font-size: 11px;</string>
                                                                 </property>
                                                             </widget>
                                                         </item>
@@ -1164,7 +1295,8 @@
                                                                     <enum>
                                                                         Qt::Orientation::Horizontal</enum>
                                                                 </property>
-                                                                <property name="sizeHint" stdset="0">
+                                                                <property name="sizeHint"
+                                                                    stdset="0">
                                                                     <size>
                                                                         <width>40</width>
                                                                         <height>20</height>
@@ -1183,7 +1315,8 @@
                                                                 </property>
                                                                 <property name="styleSheet">
                                                                     <string notr="true">color:
-                                                                        #00e676; font-size: 11px;</string>
+                                                                        #00f0ff; font-size:
+                                                                        11px;</string>
                                                                 </property>
                                                             </widget>
                                                         </item>
@@ -1191,34 +1324,19 @@
                                                 </item>
                                                 <item>
                                                     <widget class="QTableWidget" name="tablePackets">
+                                                        <property name="rowCount">
+                                                            <number>0</number>
+                                                        </property>
+                                                        <property name="columnCount">
+                                                            <number>7</number>
+                                                        </property>
                                                         <property name="styleSheet">
-                                                            <string notr="true">
-                                                                QTableWidget { background-color:
+                                                            <string notr="true">background-color:
                                                                 #050505; color: #a0a8b7;
-                                                                gridline-color: #1c2333; border: 1px
-                                                                solid #1c2333; font-family:
-                                                                &quot;JetBrains Mono&quot;;
-                                                                font-size: 11px; }
-                                                                QHeaderView::section {
-                                                                background-color: #0f121a; color:
-                                                                #00e676; padding: 4px; border: 1px
-                                                                solid #1c2333; }
-                                                                QTableWidget::item:selected {
-                                                                background-color: #00e676; color:
-                                                                #000000; }
-                                                            </string>
-                                                        </property>
-                                                        <property name="selectionBehavior">
-                                                            <enum>QAbstractItemView::SelectRows</enum>
-                                                        </property>
-                                                        <property name="selectionMode">
-                                                            <enum>QAbstractItemView::SingleSelection</enum>
-                                                        </property>
-                                                        <property name="verticalScrollBarPolicy">
-                                                            <enum>Qt::ScrollBarAlwaysOn</enum>
-                                                        </property>
-                                                        <property name="horizontalScrollBarPolicy">
-                                                            <enum>Qt::ScrollBarAsNeeded</enum>
+                                                                gridline-color: #1c2333; border:
+                                                                1px solid #1c2333; font-family:
+                                                                "JetBrains Mono"; font-size:
+                                                                11px;</string>
                                                         </property>
                                                         <column>
                                                             <property name="text">
@@ -1262,7 +1380,7 @@
 
                                         <widget class="QWidget" name="containerHex">
                                             <layout class="QVBoxLayout"
-                                                name="verticalLayout_RightHex">
+                                                name="verticalLayout_Hex">
                                                 <property name="spacing">
                                                     <number>5</number>
                                                 </property>
@@ -1285,64 +1403,34 @@
                                                         </property>
                                                         <property name="styleSheet">
                                                             <string notr="true">color: #00f0ff;
-                                                                font-weight: bold; font-size: 11px;</string>
+                                                                font-weight: bold; font-size:
+                                                                11px;</string>
                                                         </property>
                                                     </widget>
                                                 </item>
                                                 <item>
                                                     <widget class="QTableWidget" name="tableHex">
+                                                        <property name="rowCount">
+                                                            <number>0</number>
+                                                        </property>
+                                                        <property name="columnCount">
+                                                            <number>17</number>
+                                                        </property>
                                                         <property name="styleSheet">
-                                                            <string notr="true">
-                                                                QTableWidget { background-color:
-                                                                #080a10; color: #a0a8b7; border: 1px
-                                                                solid #1c2333; font-family:
-                                                                &quot;JetBrains Mono&quot;;
-                                                                font-size: 11px; }
-                                                                QHeaderView::section {
-                                                                background-color: #0f121a; color:
-                                                                #718096; border: none;
-                                                                border-bottom: 1px solid #1c2333;
-                                                                padding: 4px; }
-                                                            </string>
+                                                            <string notr="true">background-color:
+                                                                #080a10; color: #a0a8b7; border:
+                                                                1px solid #1c2333; font-family:
+                                                                "JetBrains Mono"; font-size:
+                                                                11px;</string>
                                                         </property>
-                                                        <property name="showGrid">
-                                                            <bool>false</bool>
-                                                        </property>
-                                                        <property name="selectionBehavior">
-                                                            <enum>QAbstractItemView::SelectRows</enum>
-                                                        </property>
-                                                        <property name="selectionMode">
-                                                            <enum>
-                                                                QAbstractItemView::ExtendedSelection</enum>
-                                                        </property>
-                                                        <attribute name="verticalHeaderVisible">
-                                                            <bool>false</bool>
-                                                        </attribute>
-                                                        <column>
-                                                            <property name="text">
-                                                                <string>Offset</string>
-                                                            </property>
-                                                        </column>
-                                                        <column>
-                                                            <property name="text">
-                                                                <string>Hex</string>
-                                                            </property>
-                                                        </column>
-                                                        <column>
-                                                            <property name="text">
-                                                                <string>ASCII</string>
-                                                            </property>
-                                                        </column>
                                                     </widget>
                                                 </item>
                                             </layout>
                                         </widget>
-
                                     </widget>
                                 </item>
                             </layout>
                         </widget>
-
                     </widget>
                 </item>
             </layout>

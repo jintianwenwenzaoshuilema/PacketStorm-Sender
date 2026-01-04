@@ -42,13 +42,13 @@ extern std::atomic<bool> g_is_sock_sending;
 extern std::atomic<uint64_t> g_sock_total_sent;
 extern std::atomic<uint64_t> g_sock_total_bytes;
 
-typedef void (*StatsCallback)(uint64_t total_sent, uint64_t total_bytes);
+typedef void (*StatsCallback)(uint64_t total_sent, uint64_t total_bytes, void* user_data);
 
 // [新增] Hex 数据回调定义
-typedef void (*HexCallback)(const unsigned char* data, int len);
+typedef void (*HexCallback)(const unsigned char* data, int len, void* user_data);
 
 // [新增] 错误回调定义
-typedef void (*ErrorCallback)(const char* error_msg);
+typedef void (*ErrorCallback)(const char* error_msg, void* user_data);
 
 extern "C" {
 #endif
@@ -90,6 +90,9 @@ struct SenderConfig {
     // [新增] 错误回调指针
     ErrorCallback error_callback;
 
+    // [新增] 用户数据指针，用于回调上下文
+    void* user_data;
+
     // [新增] SYN Flood 模式配置
     bool use_random_src_port;  // 是否使用随机源端口（SYN Flood模式）
     bool use_random_seq;       // 是否使用随机序列号（SYN Flood模式）
@@ -99,9 +102,12 @@ struct SenderConfig {
     // [新增] 随机IP地址范围配置（用于use_random_src_ip）
     unsigned char random_ip_base[4];  // 基础IP地址（用于计算随机IP范围）
     unsigned char random_ip_mask[4];  // 子网掩码（用于限制随机IP范围）
+
+    // [新增] 停止标志位指针，支持多线程独立控制
+    std::atomic<bool>* stop_flag;
 };
 
-typedef void (*LogCallback)(const char* msg, int level);
+typedef void (*LogCallback)(const char* msg, int level, void* user_data);
 
 struct SocketConfig {
     char target_ip[32];
@@ -127,8 +133,14 @@ struct SocketConfig {
     StatsCallback stats_callback;
     LogCallback log_callback;
     
+    // [新增] 用户数据指针
+    void* user_data;
+
     // [新增] 增加网卡名称，用于在伪造模式下进行监听和注入
     char dev_name[256];
+
+    // [新增] 停止标志位指针，支持多线程独立控制
+    std::atomic<bool>* stop_flag;
 };
 
 __declspec(dllexport) void start_send_mode(const SenderConfig* config);

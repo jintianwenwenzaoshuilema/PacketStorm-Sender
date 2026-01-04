@@ -27,9 +27,6 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
-// 初始化静态成员
-PacketWorker* PacketWorker::m_instance = nullptr;
-SocketWorker* SocketWorker::m_instance = nullptr; // [新增] 初始化 SocketWorker
 
 // ============================================================================
 // SpinBox 增强版
@@ -179,9 +176,17 @@ MainWindow::MainWindow(QWidget* parent)
       stopBtnEffect(nullptr), sockThread(nullptr), sockWorker(nullptr), m_resourceMonitor(nullptr),
       m_cpuWidget(nullptr), m_memoryWidget(nullptr), m_uploadWidget(nullptr), m_downloadWidget(nullptr),
       m_packetsLabel(nullptr), m_bytesLabel(nullptr), m_resourceContainer(nullptr), m_packetModel(nullptr),
-      m_packetTableView(nullptr), m_isLoadingConfig(true) {
+      m_packetTableView(nullptr), m_isLoadingConfig(true), m_taskGroupBox(nullptr), 
+      m_taskScrollArea(nullptr), m_taskContainerLayout(nullptr),
+    m_aggregateTimer(new QTimer(this)) {
     ui->setupUi(this);
     setupHexTableStyle();
+
+    // 初始化聚合定时器
+    m_aggregateTimer->setInterval(1000); // 恢复为 1s 聚合一次，图表更平滑
+    connect(m_aggregateTimer, &QTimer::timeout, this, &MainWindow::updateAggregateStats);
+    m_aggregateTimer->start();
+    rateTimer.start(); // [关键修复] 启动统计计时器，否则图表不会绘制
 
     // 1. 替换 SpinBox
     CommaSpinBox* newSpin = new CommaSpinBox(this);
@@ -231,10 +236,8 @@ MainWindow::MainWindow(QWidget* parent)
         ui->btnGetMac->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     }
 
-    // 3. 状态栏 - 用于显示鼠标所在位置控件的tooltip
+    // 3. 状态栏 - 用于显示鼠标所在位置控件的tooltip (样式已在 .ui 文件中定义)
     QStatusBar* bar = new QStatusBar(this);
-    bar->setStyleSheet("QStatusBar { background: #0f121a; color: #718096; border-top: 1px solid #1c2333; }"
-                       "QStatusBar::item { border: none; }");
     setStatusBar(bar);
 
     // 为所有子控件安装事件过滤器，用于显示鼠标所在位置控件的tooltip
@@ -243,7 +246,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // 4. PPS 标签
     lblTargetPPS = new QLabel("Rate: -- pps", this);
-    lblTargetPPS->setStyleSheet("color: #FFB74D; font-size: 11px;");
+    lblTargetPPS->setObjectName("lblTargetPPS");
     // 透明背景在 UI 文件中通过全局 QLabel 样式设置
     ui->formLayout_Param->addRow("", lblTargetPPS);
 
@@ -267,24 +270,19 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
 
-    connect(ui->btnStartSend, &QPushButton::clicked, this, &MainWindow::onStartSendClicked);
-    connect(ui->btnStopSend, &QPushButton::clicked, this, &MainWindow::onStopSendClicked);
+    // 确保 grpSocketSender 的标题正确
+    ui->grpSocketSender->setTitle("OS Stack Sender (Auto-Fragment)");
+
+    // [新增] 修复协议和载荷模式切换不生效的 bug
     connect(ui->rbIcmp, &QRadioButton::toggled, this, &MainWindow::onProtoToggled);
     connect(ui->rbUdp, &QRadioButton::toggled, this, &MainWindow::onProtoToggled);
     connect(ui->rbTcp, &QRadioButton::toggled, this, &MainWindow::onProtoToggled);
     connect(ui->rbDns, &QRadioButton::toggled, this, &MainWindow::onProtoToggled);
-
-    // [新增] 连接 ARP RadioButton 的信号
     connect(ui->rbArp, &QRadioButton::toggled, this, &MainWindow::onProtoToggled);
 
     connect(ui->rbPayRandom, &QRadioButton::toggled, this, &MainWindow::onPayloadModeChanged);
     connect(ui->rbPayFixed, &QRadioButton::toggled, this, &MainWindow::onPayloadModeChanged);
     connect(ui->rbPayCustom, &QRadioButton::toggled, this, &MainWindow::onPayloadModeChanged);
-    connect(ui->btnGetMac, &QPushButton::clicked, this, &MainWindow::onGetDstMacClicked);
-    
-    // [新增] 连接右侧 Socket 发送模块的信号
-    connect(ui->btnSockStart, &QPushButton::clicked, this, &MainWindow::onSockStartClicked);
-    connect(ui->btnSockStop, &QPushButton::clicked, this, &MainWindow::onSockStopClicked);
 
     // 信号联动
     connect(ui->rbSockUdp, &QRadioButton::toggled, this, [this](bool checked) {
@@ -346,48 +344,37 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     setupChart();
+    setupTrafficTable();
+    setupTaskList(); // [新增] 初始化任务列表
+    
     loadConfig();
 
-    // [修复] 在所有配置加载完成后，再连接网卡切换信号，彻底避免启动时的保存干扰
+    // 信号连接
+    connect(ui->btnPktAddTask, &QPushButton::clicked, this, [this](){ onStartSendClicked("", false); });
+    connect(ui->btnPktAddStartTask, &QPushButton::clicked, this, [this](){ onStartSendClicked("", true); }); 
+    
+    connect(ui->btnSockAddTask, &QPushButton::clicked, this, [this](){ onSockStartClicked("", false); });
+    connect(ui->btnSockAddStartTask, &QPushButton::clicked, this, [this](){ onSockStartClicked("", true); });
+
+    // [修复] 在所有配置加载完成后，再连接网卡切换信号
     connect(ui->comboInterfaceTx, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             &MainWindow::onInterfaceSelectionChanged);
 
     // [新增] 启动系统资源监控
     if (m_resourceMonitor) {
         m_resourceMonitor->startMonitoring(1000); // 每秒更新一次
-
-        // 设置初始监控的网卡
         QString currentInterface = ui->comboInterfaceTx->currentData().toString();
         if (!currentInterface.isEmpty()) {
             m_resourceMonitor->setMonitorInterface(currentInterface);
         }
     }
 
-    // [新增] 为所有子控件安装事件过滤器，用于在状态栏显示tooltip
-    // 使用递归方式为所有子控件安装事件过滤器
+    // [新增] 事件过滤器和状态同步
     installEventFilterRecursive(this);
-
-    // [新增] 为所有控件设置tooltip
     setupTooltips();
 
-    setupTrafficTable();
-    
-    // [修复] 在配置加载完成后，手动同步一次 UI 状态逻辑（取消禁用模式，改为状态同步）
     bool isSpoofing = ui->chkSockRandMac->isChecked() || ui->chkSockRandIp->isChecked();
-    bool isConnect = ui->chkConnectFlood->isChecked();
-
-    if (isSpoofing && isConnect) {
-        // 如果配置冲突（同时存了两个），优先保留伪造模式
-        ui->chkConnectFlood->setChecked(false);
-    }
-    
-    // 确保所有控件都是启用状态
-    ui->chkConnectFlood->setEnabled(true);
-    ui->chkSockRandMac->setEnabled(true);
-    ui->chkSockRandIp->setEnabled(true);
-    
-    // 同步容器可见性
-    ui->sockRandomContainer->setVisible(isSpoofing || isConnect);
+    ui->sockRandomContainer->setVisible(isSpoofing || ui->chkConnectFlood->isChecked());
 
     appendLog("System Ready. Configuration restored.", 1);
 }
@@ -412,10 +399,6 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 MainWindow::~MainWindow() {
-    // 注意：closeEvent 已经调用了 saveConfig()，正常情况下不需要在这里再次保存
-    // 但如果窗口是通过其他方式销毁的（例如程序异常退出），这里作为最后的保障
-    // 由于 closeEvent 在窗口关闭时总是会被调用，这里的保存通常是冗余的
-
     // 停止左侧 WinPcap 线程
     g_is_sending = false;
     if (workerThread) {
@@ -464,138 +447,164 @@ void MainWindow::parseIp(const QString& s, unsigned char* buf) {
 // ============================================================================
 // [新增] 右侧 Socket 模块实现 (OS Stack Sender)
 // ============================================================================
-void MainWindow::onSockStartClicked() {
-    // 1. 安全检查：如果指针不为空且线程正在运行，则通过
-    if (sockThread && sockThread->isRunning()) return;
-
-    // 2. 保存配置（确保发送时使用的配置被保存）
+void MainWindow::onSockStartClicked(const QString& existingTaskId, bool startImmediately) {
+    // 1. 保存配置
     saveConfig();
 
-    // UI 锁定逻辑...
-    ui->btnSockStart->setEnabled(false);
-    ui->btnSockStop->setEnabled(true);
+    QString taskId = existingTaskId;
+    SendingTask* task = nullptr;
+    QString protoName;
 
-    // 锁定控件...
-    ui->grpSockProto->setEnabled(false);
-    ui->editSockIp->setEnabled(false);
-    ui->spinSockPort->setEnabled(false);
-    ui->spinSockLen->setEnabled(false);
-    ui->spinSockInt->setEnabled(false);
-    ui->comboSockSrc->setEnabled(false);
+    if (taskId.isEmpty()) {
+        // 2. 构造任务 ID 和信息 (新任务)
+        protoName = ui->rbSockUdp->isChecked() ? "SOCK_UDP" : "SOCK_TCP";
+        QString target = ui->editSockIp->text();
+        taskId = QString("%1_%2_%3").arg(protoName).arg(target).arg(QDateTime::currentMSecsSinceEpoch() % 10000);
 
-    // 重置数据...
-    g_sock_total_sent = 0;
-    g_sock_total_bytes = 0;
-    rateTimer.start();
-    lastTotalSent = 0;
-    lastTotalBytes = 0;
+        // 3. 创建任务
+        task = new SendingTask();
+        task->taskId = taskId;
+        task->proto = protoName;
+        task->target = target;
+        task->lastUpdateTimer.start(); // [新增]
+        m_tasks[taskId] = task;
+    } else {
+        task = m_tasks[taskId];
+        protoName = task->proto;
+        task->lastUpdateTimer.restart(); // [新增]
+        task->lastSentCount = 0;         // [修复] 重启时重置上次计数，避免速率跳变或为0
+    }
 
-    // 创建新线程对象
-    sockThread = new QThread(this);
-    sockWorker = new SocketWorker();
+    task->isRunning = startImmediately;
+    task->stopFlag = !startImmediately;
 
-    // 配置赋值...
+    // 4. 创建工作线程和 Worker
+    if (!task->thread) task->thread = new QThread(this);
+    SocketWorker* sw = new SocketWorker();
+    task->worker = sw;
+
+    // 5. 填充配置
+    memset(&sw->config, 0, sizeof(SocketConfig));
     std::string ip = ui->editSockIp->text().toStdString();
-    memset(sockWorker->config.target_ip, 0, sizeof(sockWorker->config.target_ip));
-    strncpy(sockWorker->config.target_ip, ip.c_str(), sizeof(sockWorker->config.target_ip) - 1);
+    strncpy(sw->config.target_ip, ip.c_str(), sizeof(sw->config.target_ip) - 1);
 
-    memset(sockWorker->config.source_ip, 0, sizeof(sockWorker->config.source_ip));
     QString selectedPcapName = ui->comboSockSrc->currentData().toString();
     if (selectedPcapName.isEmpty()) {
-        strcpy(sockWorker->config.source_ip, "0.0.0.0");
-        appendLog("[SOCK] Routing: Auto (Default)", 0);
+        strcpy(sw->config.source_ip, "0.0.0.0");
     } else {
         QString mac, srcIp;
         if (GetAdapterInfoWinAPI(selectedPcapName, mac, srcIp) && !srcIp.isEmpty() && srcIp != "0.0.0.0") {
-            strncpy(sockWorker->config.source_ip, srcIp.toStdString().c_str(),
-                    sizeof(sockWorker->config.source_ip) - 1);
-            appendLog("[SOCK] Bound Interface: " + srcIp, 0);
+            strncpy(sw->config.source_ip, srcIp.toStdString().c_str(), sizeof(sw->config.source_ip) - 1);
         } else {
-            strcpy(sockWorker->config.source_ip, "0.0.0.0");
-            appendLog("[SOCK] Warning: Selected interface has no IPv4. Fallback to Auto.", 2);
+            strcpy(sw->config.source_ip, "0.0.0.0");
         }
     }
 
-    sockWorker->config.target_port = ui->spinSockPort->value();
-    sockWorker->config.is_udp = ui->rbSockUdp->isChecked();
+    sw->config.target_port = ui->spinSockPort->value();
     
-    // [修改] 增加 Connect Only 模式判断
-    sockWorker->config.is_connect_only = ui->chkConnectFlood->isChecked();
+    // [修复] 使用任务保存的协议类型
+    sw->config.is_udp = (protoName == "SOCK_UDP");
     
-    // [新增] 填充随机化选项和端口设置
-    sockWorker->config.use_random_src_port = ui->chkSockRandPort->isChecked();
-    sockWorker->config.use_random_src_mac = ui->chkSockRandMac->isChecked();
-    sockWorker->config.use_random_src_ip = ui->chkSockRandIp->isChecked();
-    sockWorker->config.use_random_seq = ui->chkSockRandSeq->isChecked();
-    sockWorker->config.source_port = (unsigned short)ui->spinSockSPort->value();
-
-    // [修复] 填充网卡名称：必须使用右侧 comboSockSrc 的选择，而非左侧
-    strncpy(sockWorker->config.dev_name, selectedPcapName.toStdString().c_str(), sizeof(sockWorker->config.dev_name) - 1);
+    sw->config.is_connect_only = ui->chkConnectFlood->isChecked();
+    sw->config.use_random_src_port = ui->chkSockRandPort->isChecked();
+    sw->config.use_random_src_mac = ui->chkSockRandMac->isChecked();
+    sw->config.use_random_src_ip = ui->chkSockRandIp->isChecked();
+    sw->config.use_random_seq = ui->chkSockRandSeq->isChecked();
+    sw->config.source_port = (unsigned short)ui->spinSockSPort->value();
+    strncpy(sw->config.dev_name, selectedPcapName.toStdString().c_str(), sizeof(sw->config.dev_name) - 1);
     
-    // 复制基础MAC
     QString baseMac = ui->editSrcMac->text();
-    parseMac(baseMac, sockWorker->config.src_mac);
+    parseMac(baseMac, sw->config.src_mac);
 
-    // 填充随机IP基础和掩码
-    if (sockWorker->config.use_random_src_ip) {
-        QString srcIpStr = ui->editSrcIp->text();
-        QStringList ipParts = srcIpStr.split('.');
-        if (ipParts.size() == 4) {
-            sockWorker->config.random_ip_base[0] = (unsigned char)ipParts[0].toInt();
-            sockWorker->config.random_ip_base[1] = (unsigned char)ipParts[1].toInt();
-            sockWorker->config.random_ip_base[2] = (unsigned char)ipParts[2].toInt();
-            sockWorker->config.random_ip_base[3] = 0;
-            sockWorker->config.random_ip_mask[0] = 255;
-            sockWorker->config.random_ip_mask[1] = 255;
-            sockWorker->config.random_ip_mask[2] = 255;
-            sockWorker->config.random_ip_mask[3] = 0;
+    sw->config.payload_len = ui->spinSockLen->value();
+    sw->config.interval_us = ui->spinSockInt->value();
+    sw->config.stop_flag = &task->stopFlag;
+    sw->config.user_data = sw;
+
+    // 6. 连接信号
+    sw->moveToThread(task->thread);
+    connect(task->thread, &QThread::started, sw, &SocketWorker::doWork);
+    connect(sw, &SocketWorker::workFinished, task->thread, &QThread::quit);
+    connect(sw, &SocketWorker::statsUpdated, this, [this, taskId](uint64_t s, uint64_t b){
+        updateTaskStats(taskId, s, b);
+    });
+    connect(sw, &SocketWorker::logUpdated, this, [this](QString msg, int level){ appendLog(msg, level); });
+
+    // 7. 创建任务卡片 (仅新任务需要创建 UI)
+    if (existingTaskId.isEmpty()) {
+        QWidget* card = new QWidget();
+        card->setFixedHeight(70); 
+        card->setObjectName("taskCard");
+        
+        QHBoxLayout* cardLayout = new QHBoxLayout(card);
+        cardLayout->setContentsMargins(10, 5, 10, 5);
+        cardLayout->setSpacing(12);
+
+        // [列1] 按钮
+        QVBoxLayout* btnVly = new QVBoxLayout();
+        btnVly->setSpacing(4);
+        QPushButton* btnSS = new QPushButton(startImmediately ? "Stop" : "Start");
+        btnSS->setObjectName(startImmediately ? "btnTaskStop" : "btnTaskStart");
+        btnSS->setFixedSize(85, 28); 
+        
+        QPushButton* btnDel = new QPushButton("Delete"); 
+        btnDel->setFixedSize(85, 28); 
+        btnDel->setObjectName("btnTaskDelete");
+
+        btnVly->addWidget(btnSS);
+        btnVly->addWidget(btnDel);
+        cardLayout->addLayout(btnVly);
+
+        // [列2] 信息
+        QVBoxLayout* infoVly = new QVBoxLayout();
+        infoVly->setSpacing(0);
+        QLabel* lblProto = new QLabel(protoName);
+        lblProto->setObjectName("lblProtoSocket");
+        QLabel* lblTarget = new QLabel(task->target);
+        lblTarget->setObjectName("lblTargetSmall");
+        infoVly->addWidget(lblProto);
+        infoVly->addWidget(lblTarget);
+        cardLayout->addLayout(infoVly);
+
+        cardLayout->addStretch();
+
+        // [列3] 统计
+        QLabel* lblStats = new QLabel("Sent: 0\nRate: Updating...");
+        lblStats->setObjectName("lblStatsSmall");
+        lblStats->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        cardLayout->addWidget(lblStats);
+
+        task->cardWidget = card;
+        task->lblStats = lblStats;
+        task->btnStartStop = btnSS;
+
+        m_taskContainerLayout->insertWidget(m_taskContainerLayout->count() - 1, card);
+
+        connect(btnSS, &QPushButton::clicked, this, [this, taskId](){ onTaskStartStopClicked(taskId); });
+        connect(btnDel, &QPushButton::clicked, this, [this, taskId](){ onTaskRemoveClicked(taskId); });
+    } else {
+        // 重启时更新按钮状态
+        if (task->btnStartStop) {
+            task->btnStartStop->setText("Stop");
+            task->btnStartStop->setObjectName("btnTaskStop");
+            task->btnStartStop->style()->unpolish(task->btnStartStop);
+            task->btnStartStop->style()->polish(task->btnStartStop);
         }
     }
 
-    sockWorker->config.payload_len = ui->spinSockLen->value();
-    sockWorker->config.interval_us = ui->spinSockInt->value();
-
-    sockWorker->moveToThread(sockThread);
-
-    // 连接信号
-    connect(sockThread, &QThread::started, sockWorker, &SocketWorker::doWork);
-    connect(sockWorker, &SocketWorker::workFinished, sockThread, &QThread::quit);
-    connect(sockWorker, &SocketWorker::workFinished, sockWorker, &SocketWorker::deleteLater);
-    connect(sockThread, &QThread::finished, sockThread, &QThread::deleteLater);
-    connect(sockWorker, &SocketWorker::statsUpdated, this, &MainWindow::updateSockStats, Qt::QueuedConnection);
-    connect(
-        sockWorker, &SocketWorker::logUpdated, this, [this](QString msg, int level) { this->appendLog(msg, level); },
-        Qt::QueuedConnection);
-
-    // === [关键修复] 线程结束后的清理逻辑 ===
-    connect(sockThread, &QThread::finished, this, [this]() {
-        ui->btnSockStart->setEnabled(true);
-        ui->btnSockStop->setEnabled(false);
-        ui->grpSockProto->setEnabled(true);
-        ui->editSockIp->setEnabled(true);
-        ui->spinSockPort->setEnabled(true);
-        ui->spinSockLen->setEnabled(true);
-        ui->spinSockInt->setEnabled(true);
-        ui->comboSockSrc->setEnabled(true);
-
-        appendLog("[SOCK] Standard Sender stopped.", 0);
-
-        // 保存配置（作为保障，确保Socket发送线程结束时的配置被保存）
-        saveConfig();
-
-        // [这里是修复的核心] 将指针置空，防止下次点击时访问野指针
-        sockThread = nullptr;
-        sockWorker = nullptr;
-    });
-
-    sockThread->start();
-    appendLog(QString("[SOCK] Started... Int: %1us").arg(sockWorker->config.interval_us), 1);
+    // 8. 启动
+    if (startImmediately) {
+        task->thread->start();
+        appendLog(QString("Task %1 started.").arg(taskId), 1);
+    } else {
+        appendLog(QString("Task %1 added (Stopped).").arg(taskId), 0);
+    }
 }
 
 void MainWindow::onSockStopClicked() {
     // 设置停止标志，线程循环检测到后会退出
     g_is_sock_sending = false;
-    ui->btnSockStop->setEnabled(false);
+    // ui->btnSockStop->setEnabled(false); // [移除] 现在按钮作为工厂按钮，应始终启用
     
     // 保存配置（确保停止时的配置被保存）
     saveConfig();
@@ -661,7 +670,6 @@ void MainWindow::setupChart() {
 
     viewPPS = new QChartView(chartPPS);
     viewPPS->setRenderHint(QPainter::Antialiasing);
-    viewPPS->setStyleSheet("background: transparent;");
 
     // =========================================================
     // 2. 下半部分：Bandwidth 图表 (紫色)
@@ -688,7 +696,6 @@ void MainWindow::setupChart() {
 
     viewBW = new QChartView(chartBW);
     viewBW->setRenderHint(QPainter::Antialiasing);
-    viewBW->setStyleSheet("background: transparent;");
 
     // =========================================================
     // 3. 添加到布局 (垂直排列)
@@ -712,6 +719,12 @@ void MainWindow::setupChart() {
     m_chartTimeX = 0;
     m_maxPPS = UIConfig::CHART_PPS_DEFAULT_MAX;
     m_maxMbps = UIConfig::CHART_BW_DEFAULT_MAX;
+
+    // [关键修复] 强制启用按钮，样式已由 .ui 文件统一管理
+    ui->btnPktAddTask->setEnabled(true);
+    ui->btnPktAddStartTask->setEnabled(true);
+    ui->btnSockAddTask->setEnabled(true);
+    ui->btnSockAddStartTask->setEnabled(true);
 }
 
 void MainWindow::loadInterfaces() {
@@ -940,6 +953,9 @@ void MainWindow::onProtoToggled() {
 
     if (isArp) {
         ui->spinPktLen->setEnabled(false); // ARP 长度固定
+        ui->spinPktLen->setProperty("arpMode", true);
+        ui->spinPktLen->style()->unpolish(ui->spinPktLen);
+        ui->spinPktLen->style()->polish(ui->spinPktLen);
         // 提示用户：广播 ARP 请将 DstMAC 设为 FF:FF...
         QComboBox* dstMacCombo = qobject_cast<QComboBox*>(ui->editDstMac);
         if (dstMacCombo) {
@@ -950,12 +966,190 @@ void MainWindow::onProtoToggled() {
         }
     } else {
         ui->spinPktLen->setEnabled(true);
+        ui->spinPktLen->setProperty("arpMode", false);
+        ui->spinPktLen->style()->unpolish(ui->spinPktLen);
+        ui->spinPktLen->style()->polish(ui->spinPktLen);
     }
 }
 
 // ============================================================================
 // Wireshark 风格辅助函数
 // ============================================================================
+
+// ============================================================================
+// [新增] 初始化任务列表 - 现在从 UI 文件加载 (卡片式)
+// ============================================================================
+void MainWindow::setupTaskList() {
+    // 1. 直接引用 UI 中定义的控件
+    m_taskGroupBox = ui->taskManager;
+    m_taskScrollArea = ui->taskScrollArea;
+    m_taskContainerLayout = qobject_cast<QVBoxLayout*>(ui->taskContainer->layout());
+
+    if (!m_taskContainerLayout) {
+        m_taskContainerLayout = new QVBoxLayout(ui->taskContainer);
+        m_taskContainerLayout->setContentsMargins(5, 5, 5, 5);
+        m_taskContainerLayout->setSpacing(8);
+    }
+    
+    // 2. 初始垫底，让条目向上对齐
+    m_taskContainerLayout->addStretch();
+
+    // 3. 连接全局控制按钮
+    connect(ui->btnStartAll, &QPushButton::clicked, this, &MainWindow::onStartAllClicked);
+    connect(ui->btnStopAll, &QPushButton::clicked, this, &MainWindow::onStopAllClicked);
+    connect(ui->btnClearAll, &QPushButton::clicked, this, [this]() {
+        // 获取所有任务 ID，并逐个执行安全删除逻辑
+        QStringList taskIds = m_tasks.keys();
+        for (const QString& taskId : taskIds) {
+            onTaskRemoveClicked(taskId);
+        }
+        appendLog("All tasks have been cleared from manager.", 1);
+    });
+
+    // 为全局按钮安装事件过滤器实现悬停动画
+    ui->btnStartAll->installEventFilter(this);
+    ui->btnStopAll->installEventFilter(this);
+    ui->btnClearAll->installEventFilter(this);
+}
+
+void MainWindow::onAddTaskClicked() {
+    // 这个函数可以由一个新的按钮触发，或者直接复用 onStartSendClicked
+    onStartSendClicked();
+}
+
+void MainWindow::onStartAllClicked() {
+    for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it) {
+        if (!it.value()->isRunning) {
+            onTaskStartStopClicked(it.key());
+        }
+    }
+}
+
+void MainWindow::onStopAllClicked() {
+    for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it) {
+        if (it.value()->isRunning) {
+            onTaskStartStopClicked(it.key());
+        }
+    }
+}
+
+void MainWindow::onTaskStartStopClicked(const QString& taskId) {
+    if (!m_tasks.contains(taskId)) return;
+    SendingTask* task = m_tasks[taskId];
+
+    if (task->isRunning) {
+        // 停止任务
+        task->stopFlag = true;
+        task->isRunning = false;
+        appendLog(QString("Task %1 stopped.").arg(taskId), 0);
+    } else {
+        // 启动任务：彻底清理旧线程和旧 Worker，然后重建
+        task->stopFlag = false;
+        task->isRunning = true;
+        
+        if (task->thread) {
+            task->thread->quit();
+            task->thread->wait();
+            delete task->thread;
+            task->thread = nullptr;
+        }
+        if (task->worker) {
+            delete task->worker;
+            task->worker = nullptr;
+        }
+
+        // 根据协议类型重建对应的 Worker
+        if (task->proto.startsWith("SOCK")) {
+            onSockStartClicked(taskId);
+        } else {
+            onStartSendClicked(taskId);
+        }
+        return; // onStartSendClicked/onSockStartClicked 会处理剩下的逻辑
+    }
+
+    // 更新按钮文字和样式 (仅针对停止状态，启动状态在 onStartXXX 函数中处理)
+    if (task->btnStartStop) {
+        task->btnStartStop->setText(task->isRunning ? "Stop" : "Start");
+        task->btnStartStop->setObjectName(task->isRunning ? "btnTaskStop" : "btnTaskStart");
+        // 强制刷新样式
+        task->btnStartStop->style()->unpolish(task->btnStartStop);
+        task->btnStartStop->style()->polish(task->btnStartStop);
+    }
+}
+
+void MainWindow::onTaskRemoveClicked(const QString& taskId) {
+    if (!m_tasks.contains(taskId)) return;
+    
+    SendingTask* task = m_tasks[taskId];
+    
+    // 1. 如果任务正在运行，先执行停止逻辑
+    if (task->isRunning || (task->thread && task->thread->isRunning())) {
+        task->stopFlag = true;
+        task->isRunning = false;
+        appendLog(QString("Task %1 stopping before deletion...").arg(taskId), 0);
+        
+        if (task->thread) {
+            task->thread->quit();
+            task->thread->wait();
+        }
+        appendLog(QString("Task %1 stopped.").arg(taskId), 1);
+    }
+    
+    // 2. 执行移除和清理逻辑
+    if (task->cardWidget) {
+        task->cardWidget->hide();
+        m_taskContainerLayout->removeWidget(task->cardWidget);
+        task->cardWidget->deleteLater();
+    }
+
+    m_tasks.remove(taskId);
+    delete task;
+    
+    appendLog(QString("Task %1 has been deleted.").arg(taskId), 0);
+}
+
+void MainWindow::updateAggregateStats() {
+    uint64_t totalSent = 0;
+    uint64_t totalBytes = 0;
+
+    // 汇总所有活动任务的数据
+    for (auto task : m_tasks) {
+        totalSent += task->sentCount;
+        totalBytes += task->byteCount;
+    }
+
+    // 更新底部总数显示 (不再依赖全局原子变量，而是使用任务汇总值)
+    updateStatsDisplay(totalSent, totalBytes);
+
+    // 驱动图表更新 (updateStats 内部会自动处理 delta 计算和曲线绘制)
+    updateStats(totalSent, totalBytes);
+}
+
+void MainWindow::updateTaskStats(const QString& taskId, uint64_t sent, uint64_t bytes) {
+    if (!m_tasks.contains(taskId)) return;
+    SendingTask* task = m_tasks[taskId];
+    task->sentCount = sent;
+    task->byteCount = bytes;
+
+    // 计算单任务速率 (恢复频率为 500ms)
+    qint64 elapsed = task->lastUpdateTimer.elapsed();
+    if (elapsed >= 500) {
+        uint64_t diff = (sent >= task->lastSentCount) ? (sent - task->lastSentCount) : sent;
+        double pps = (double)diff * 1000.0 / elapsed;
+        
+        task->lastSentCount = sent;
+        task->lastUpdateTimer.restart();
+
+        if (task->lblStats) {
+            QString ppsStr;
+            if (pps >= 1000000.0) ppsStr = QString::number(pps / 1000000.0, 'f', 2) + " Mpps";
+            else if (pps >= 1000.0) ppsStr = QString::number(pps / 1000.0, 'f', 1) + " kpps";
+            else ppsStr = QString::number((int)pps) + " pps";
+
+            task->lblStats->setText(QString("Sent: %1\nRate: %2").arg(sent).arg(ppsStr));
+        }
+    }
+}
 
 // ============================================================================
 // [MVC] 初始化表格 - 使用 Model/View 架构
@@ -1010,31 +1204,8 @@ void MainWindow::setupTrafficTable() {
     packetTableView->setModel(m_packetModel);       // 绑定 Model
 
     // 3. 样式表设置（适配 QTableView）
-    packetTableView->setStyleSheet("QTableView {"
-                                   "   background-color: #050505;"
-                                   "   color: #a0a8b7;"
-                                   "   gridline-color: #1c2333;"
-                                   "   border: none;"
-                                   "   font-family: 'JetBrains Mono';"
-                                   "   font-size: 10px;"
-                                   "}"
-                                   "QHeaderView::section {"
-                                   "   background-color: #0f121a;"
-                                   "   color: #00e676;"
-                                   "   padding: 2px;"
-                                   "   border: 1px solid #1c2333;"
-                                   "   font-size: 10px;"
-                                   "   height: 18px;"
-                                   "}"
-                                   "QTableView::item {"
-                                   "   padding-top: 0px;"
-                                   "   padding-bottom: 0px;"
-                                   "   border: none;"
-                                   "}"
-                                   "QTableView::item:selected {"
-                                   "   background-color: #00e676;"
-                                   "   color: #000000;"
-                                   "}");
+    // 默认样式已在 .ui 文件中定义
+    packetTableView->setObjectName("tablePackets"); 
 
     // 4. 基础属性
     packetTableView->verticalHeader()->setVisible(false);
@@ -1261,232 +1432,201 @@ MainWindow::PacketInfo MainWindow::parsePacket(const QByteArray& data) {
     return info;
 }
 
-void MainWindow::onStartSendClicked() {
-    // 1. 防止重复启动
-    if (workerThread && workerThread->isRunning()) return;
-
-    // 2. 保存配置与历史记录
+void MainWindow::onStartSendClicked(const QString& existingTaskId, bool startImmediately) {
+    // 1. 保存配置
     saveConfig();
 
-    // editDstMac 现在是 QComboBox，使用 currentText()
-    QString dstMac = qobject_cast<QComboBox*>(ui->editDstMac)->currentText();
+    QString taskId = existingTaskId;
+    SendingTask* task = nullptr;
+    QString protoName;
 
-    // 注意：dstMac 变量在后面还会使用，所以在这里声明
+    if (taskId.isEmpty()) {
+        // 2. 构造任务 ID 和基本信息 (新任务)
+        protoName = "ICMP";
+        if (ui->rbUdp->isChecked()) protoName = "UDP";
+        else if (ui->rbTcp->isChecked()) protoName = "TCP";
+        else if (ui->rbDns->isChecked()) protoName = "DNS";
+        else if (ui->rbArp->isChecked()) protoName = "ARP";
 
-    // 3. 重置全局统计
-    g_total_sent = 0;
-    g_total_bytes = 0;
-    lastTotalSent = 0;
-    lastTotalBytes = 0;
-    rateTimer.start();
+        QString target = ui->editDstIp->currentText();
+        taskId = QString("%1_%2_%3").arg(protoName).arg(target).arg(QDateTime::currentMSecsSinceEpoch() % 10000);
 
-    // 4. 重置统计显示和图表
-    updateStatsDisplay(0, 0);
-    seriesPPS->clear();
-    seriesMbps->clear();
-    m_ppsHistory.clear();
-    m_rawByteHistory.clear();
-    m_chartTimeX = 0;
-    axisX_PPS->setRange(0, UIConfig::CHART_TIME_RANGE);
-    axisX_BW->setRange(0, UIConfig::CHART_TIME_RANGE);
-
-    // ========================================================================
-    // [UI Reset] Wireshark 风格列表初始化
-    // ========================================================================
-    // if (ui->txtLog) ui->txtLog->clear();          // 1. 清空左侧日志
-    // [MVC] 清空 Model，View 自动更新
-    if (m_packetModel) {
-        m_packetModel->clear();
+        // 3. 创建任务结构
+        task = new SendingTask();
+        task->taskId = taskId;
+        task->proto = protoName;
+        task->target = target;
+        task->lastUpdateTimer.start(); // [新增]
+        m_tasks[taskId] = task;
+    } else {
+        task = m_tasks[taskId];
+        protoName = task->proto;
+        task->lastUpdateTimer.restart(); // [新增]
+        task->lastSentCount = 0;         // [修复] 重启时重置上次计数，避免速率跳变或为0
     }
 
-    m_packetCount = 0;
-    setupTrafficTable();
-    if (m_packetTableView) {
-        m_packetTableView->verticalHeader()->setMinimumSectionSize(15);
-    }
-    // ========================================================================
+    task->isRunning = startImmediately;
+    task->stopFlag = !startImmediately;
 
-    // 5. 锁定 UI
-    ui->btnStartSend->setEnabled(false);
-    ui->btnStopSend->setEnabled(true);
-    ui->comboInterfaceTx->setEnabled(false);
-    ui->grpParam->setEnabled(false);
-    ui->grpPayload->setEnabled(false);
-    ui->grpAddr->setEnabled(false);
+    // 4. 创建工作线程和 Worker
+    if (!task->thread) task->thread = new QThread(this);
+    PacketWorker* pw = new PacketWorker();
+    task->worker = pw;
 
-    // 6. 准备工作线程
-    if (workerThread) {
-        delete worker;
-        delete workerThread;
-    }
-    workerThread = new QThread(this);
-    worker = new PacketWorker();
-    memset(&worker->config, 0, sizeof(SenderConfig));
-
-    // 7. 填充配置 (MAC, IP, Interface)
+    // 5. 填充 Worker 配置 (从当前 UI 获取)
+    // ... (rest of the config filling logic) ...
+    memset(&pw->config, 0, sizeof(SenderConfig));
     std::string dev = ui->comboInterfaceTx->currentData().toString().toStdString();
-    strncpy(worker->config.dev_name, dev.c_str(), sizeof(worker->config.dev_name) - 1);
+    strncpy(pw->config.dev_name, dev.c_str(), sizeof(pw->config.dev_name) - 1);
 
-    parseMac(ui->editSrcMac->text(), worker->config.src_mac);
-    // editDstMac 现在是 QComboBox，使用 currentText()
-    // dstMac 变量已在上面声明，这里直接使用
-    parseMac(dstMac, worker->config.des_mac);
-    parseIp(ui->editSrcIp->text(), worker->config.src_ip);
-    parseIp(ui->editDstIp->currentText(), worker->config.des_ip);
+    parseMac(ui->editSrcMac->text(), pw->config.src_mac);
+    parseMac(qobject_cast<QComboBox*>(ui->editDstMac)->currentText(), pw->config.des_mac);
+    parseIp(ui->editSrcIp->text(), pw->config.src_ip);
+    parseIp(ui->editDstIp->currentText(), pw->config.des_ip);
 
-    // 8. 填充参数
-    worker->config.send_interval_us = ui->spinInterval->value();
-    worker->config.src_port = ui->spinSrcPort->value();
-    worker->config.dst_port = ui->spinDstPort->value();
+    pw->config.send_interval_us = ui->spinInterval->value();
+    pw->config.src_port = ui->spinSrcPort->value();
+    pw->config.dst_port = ui->spinDstPort->value();
 
-    if (ui->rbUdp->isChecked())
-        worker->config.packet_type = UDP_PACKAGE;
-    else if (ui->rbTcp->isChecked())
-        worker->config.packet_type = TCP_PACKAGE;
-    else if (ui->rbDns->isChecked())
-        worker->config.packet_type = DNS_PACKAGE;
-    else if (ui->rbArp->isChecked())
-        worker->config.packet_type = ARP_PACKAGE;
-    else
-        worker->config.packet_type = ICMP_PACKAGE;
+    // [修复] 使用任务保存的协议类型，而不是当前 UI 选中的类型
+    if (protoName == "UDP") pw->config.packet_type = UDP_PACKAGE;
+    else if (protoName == "TCP") pw->config.packet_type = TCP_PACKAGE;
+    else if (protoName == "DNS") pw->config.packet_type = DNS_PACKAGE;
+    else if (protoName == "ARP") pw->config.packet_type = ARP_PACKAGE;
+    else pw->config.packet_type = ICMP_PACKAGE;
 
-    if (ui->rbTcp->isChecked()) {
+    if (protoName == "TCP") {
         int flags = 0;
         if (ui->chkFin->isChecked()) flags |= 0x01;
         if (ui->chkSyn->isChecked()) flags |= 0x02;
         if (ui->chkRst->isChecked()) flags |= 0x04;
         if (ui->chkPsh->isChecked()) flags |= 0x08;
         if (ui->chkAck->isChecked()) flags |= 0x10;
-        worker->config.tcp_flags = flags;
-        
-        worker->config.use_random_src_port = false;
-        worker->config.use_random_seq = false;
-        worker->config.use_random_src_mac = false;
-        worker->config.use_random_src_ip = false;
-    } else {
-        // 非TCP协议，重置SYN Flood配置
-        worker->config.use_random_src_port = false;
-        worker->config.use_random_seq = false;
-        worker->config.use_random_src_mac = false;
-        worker->config.use_random_src_ip = false;
+        pw->config.tcp_flags = flags;
     }
 
     std::string domain = ui->editDomain->text().toStdString();
-    strncpy(worker->config.dns_domain, domain.c_str(), sizeof(worker->config.dns_domain) - 1);
+    strncpy(pw->config.dns_domain, domain.c_str(), sizeof(pw->config.dns_domain) - 1);
 
-    // 9. 载荷配置
-    worker->config.payload_len = ui->spinPktLen->value();
+    pw->config.payload_len = ui->spinPktLen->value();
     if (ui->rbPayFixed->isChecked()) {
-        worker->config.payload_mode = PAYLOAD_FIXED;
-        worker->config.fixed_byte_val = (unsigned char)ui->spinFixVal->value();
+        pw->config.payload_mode = PAYLOAD_FIXED;
+        pw->config.fixed_byte_val = (unsigned char)ui->spinFixVal->value();
     } else if (ui->rbPayCustom->isChecked()) {
-        worker->config.payload_mode = PAYLOAD_CUSTOM;
-        worker->customDataBuffer = ui->editCustomData->text().toUtf8();
+        pw->config.payload_mode = PAYLOAD_CUSTOM;
+        pw->customDataBuffer = ui->editCustomData->text().toUtf8();
     } else {
-        worker->config.payload_mode = PAYLOAD_RANDOM;
+        pw->config.payload_mode = PAYLOAD_RANDOM;
     }
 
-    // 10. 线程与信号连接
-    worker->moveToThread(workerThread);
+    pw->config.stop_flag = &task->stopFlag;
+    pw->config.user_data = pw;
 
-    connect(workerThread, &QThread::started, worker, &PacketWorker::doSendWork);
-    connect(worker, &PacketWorker::workFinished, workerThread, &QThread::quit);
-    connect(worker, &PacketWorker::statsUpdated, this, &MainWindow::updateStats, Qt::QueuedConnection);
-    // [新增] 连接错误信号
-    connect(
-        worker, &PacketWorker::errorOccurred, this,
-        [this](QString error_msg) {
-            appendLog("[ERROR] " + error_msg, 2);
-            QMessageBox::critical(this, "发送错误", error_msg);
-        },
-        Qt::QueuedConnection);
-
-    // ========================================================================
-    // [核心] Wireshark 风格数据流更新逻辑
-    // ========================================================================
-    connect(
-        worker, &PacketWorker::hexUpdated, this,
-        [this](QByteArray data) {
-            // [MVC] 使用 Model 添加数据包，View 自动更新
-            if (!m_packetModel) return;
-
-            // 1. 数据解析
-            m_packetCount++;
-            PacketInfo parseInfo = parsePacket(data);
-
-            // 2. 转换为 Model 的 PacketInfo
-            PacketTableModel::PacketInfo modelInfo;
-            modelInfo.packetNumber = m_packetCount;
-            modelInfo.timestamp = QDateTime::currentDateTime();
-            modelInfo.src = parseInfo.src;
-            modelInfo.dst = parseInfo.dst;
-            modelInfo.proto = parseInfo.proto;
-            modelInfo.length = parseInfo.length;
-            modelInfo.info = parseInfo.info;
-            modelInfo.rawData = data;
-
-            // 3. [MVC] 更新 Model，View 会自动更新
-            m_packetModel->addPacket(modelInfo);
-
-            // 4. 自动滚动与视图联动
-            if (ui->chkAutoScroll->isChecked() && m_packetTableView && m_packetModel) {
-                int rowCount = m_packetModel->rowCount();
-                if (rowCount > 0) {
-                    QModelIndex lastIndex = m_packetModel->index(rowCount - 1, 0);
-                    if (lastIndex.isValid()) {
-                        m_packetTableView->scrollTo(lastIndex, QAbstractItemView::PositionAtBottom);
-                    }
-                }
-
-                // [修复] 自动滚动时，实时显示最新包的 Hex
-                updateHexTable(data);
-            }
-        },
-        Qt::QueuedConnection);
-    // ========================================================================
-
-    // 11. 结束清理
-    connect(workerThread, &QThread::finished, this, [this]() {
-        ui->btnStartSend->setEnabled(true);
-        ui->btnStopSend->setEnabled(false);
-        ui->comboInterfaceTx->setEnabled(true);
-        ui->grpParam->setEnabled(true);
-        ui->grpPayload->setEnabled(true);
-        ui->grpAddr->setEnabled(true);
-        
-        // 保存配置（作为保障，确保线程结束时的配置被保存）
-        saveConfig();
-        
-        // appendLog("Transmission thread stopped.", 0); // 你的旧日志函数
+    // 6. 连接信号
+    pw->moveToThread(task->thread);
+    connect(task->thread, &QThread::started, pw, &PacketWorker::doSendWork);
+    connect(pw, &PacketWorker::workFinished, task->thread, &QThread::quit);
+    connect(pw, &PacketWorker::statsUpdated, this, [this, taskId](uint64_t s, uint64_t b){
+        updateTaskStats(taskId, s, b);
+    });
+    connect(pw, &PacketWorker::hexUpdated, this, [this](QByteArray data){
+        // 只有最后一个活动任务显示在流量表里，或者这里可以做更复杂的逻辑
+        // 为简化，我们让所有任务的采样都显示在主流量表
+        if (!m_packetModel) return;
+        m_packetCount++;
+        PacketInfo parseInfo = parsePacket(data);
+        PacketTableModel::PacketInfo modelInfo;
+        modelInfo.packetNumber = m_packetCount;
+        modelInfo.timestamp = QDateTime::currentDateTime();
+        modelInfo.src = parseInfo.src;
+        modelInfo.dst = parseInfo.dst;
+        modelInfo.proto = parseInfo.proto;
+        modelInfo.length = parseInfo.length;
+        modelInfo.info = parseInfo.info;
+        modelInfo.rawData = data;
+        m_packetModel->addPacket(modelInfo);
+        if (ui->chkAutoScroll->isChecked() && m_packetTableView) {
+            m_packetTableView->scrollToBottom();
+            updateHexTable(data);
+        }
     });
 
-    // 12. 启动线程
-    workerThread->start();
+    // 7. 创建任务卡片 (仅新任务需要创建 UI)
+    if (existingTaskId.isEmpty()) {
+        QWidget* card = new QWidget();
+        card->setFixedHeight(70); 
+        card->setObjectName("taskCard");
+        
+        QHBoxLayout* cardLayout = new QHBoxLayout(card);
+        cardLayout->setContentsMargins(10, 5, 10, 5);
+        cardLayout->setSpacing(12);
 
-    // 13. 动画效果
-    if (!stopBtnEffect) {
-        stopBtnEffect = new QGraphicsDropShadowEffect(this);
-        stopBtnEffect->setOffset(0, 0);
-        stopBtnEffect->setColor(QColor(255, 0, 0, 255));
-        stopBtnEffect->setBlurRadius(0);
-        ui->btnStopSend->setGraphicsEffect(stopBtnEffect);
+        // [列1] 操作按钮
+        QVBoxLayout* btnVly = new QVBoxLayout();
+        btnVly->setSpacing(4); 
+        QPushButton* btnSS = new QPushButton(startImmediately ? "Stop" : "Start");
+        btnSS->setObjectName(startImmediately ? "btnTaskStop" : "btnTaskStart");
+        btnSS->setFixedSize(85, 28); 
+        
+        QPushButton* btnDel = new QPushButton("Delete"); 
+        btnDel->setFixedSize(85, 28); 
+        btnDel->setObjectName("btnTaskDelete");
+
+        btnVly->addWidget(btnSS);
+        btnVly->addWidget(btnDel);
+        cardLayout->addLayout(btnVly);
+
+        // [列2] 任务核心信息
+        QVBoxLayout* infoVly = new QVBoxLayout();
+        infoVly->setSpacing(0);
+        QLabel* lblProto = new QLabel(protoName);
+        lblProto->setObjectName("lblProtoWinPcap");
+        QLabel* lblTarget = new QLabel(task->target);
+        lblTarget->setObjectName("lblTargetSmall");
+        infoVly->addWidget(lblProto);
+        infoVly->addWidget(lblTarget);
+        cardLayout->addLayout(infoVly);
+
+        cardLayout->addStretch();
+
+        // [列3] 统计数据
+        QLabel* lblStats = new QLabel("Sent: 0\nRate: Updating...");
+        lblStats->setObjectName("lblStatsSmall");
+        lblStats->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        cardLayout->addWidget(lblStats);
+
+        task->cardWidget = card;
+        task->lblStats = lblStats;
+        task->btnStartStop = btnSS;
+
+        // 插入到布局中 (放在 stretch 之前)
+        m_taskContainerLayout->insertWidget(m_taskContainerLayout->count() - 1, card);
+
+        connect(btnSS, &QPushButton::clicked, this, [this, taskId](){ onTaskStartStopClicked(taskId); });
+        connect(btnDel, &QPushButton::clicked, this, [this, taskId](){ onTaskRemoveClicked(taskId); });
+    } else {
+        // 重启任务时更新按钮显示
+        if (task->btnStartStop) {
+            task->btnStartStop->setText("Stop");
+            task->btnStartStop->setObjectName("btnTaskStop");
+            task->btnStartStop->style()->unpolish(task->btnStartStop);
+            task->btnStartStop->style()->polish(task->btnStartStop);
+        }
     }
-    if (!stopBtnAnim) {
-        stopBtnAnim = new QPropertyAnimation(stopBtnEffect, "blurRadius", this);
-        stopBtnAnim->setDuration(UIConfig::STOP_BUTTON_ANIM_DURATION);
-        stopBtnAnim->setStartValue(UIConfig::STOP_BUTTON_ANIM_START);
-        stopBtnAnim->setEndValue(UIConfig::STOP_BUTTON_ANIM_END);
-        stopBtnAnim->setEasingCurve(QEasingCurve::InOutSine);
-        stopBtnAnim->setLoopCount(-1);
+
+    // 8. 启动线程
+    if (startImmediately) {
+        task->thread->start();
+        appendLog(QString("Task %1 started.").arg(taskId), 1);
+    } else {
+        appendLog(QString("Task %1 added (Stopped).").arg(taskId), 0);
     }
-    stopBtnAnim->start();
-    ui->btnStopSend->setFocus();
 }
 
 void MainWindow::onStopSendClicked() {
     // 1. 停止发送标志
     g_is_sending = false;
-    ui->btnStopSend->setEnabled(false);
+    // ui->btnStopSend->setEnabled(false); // [移除] 始终启用
 
     // ==============================================================================
     // [修复核心] 不要在这里调用 updateStats！
@@ -1516,7 +1656,7 @@ void MainWindow::onStopSendClicked() {
         stopBtnAnim = nullptr;
     }
     if (stopBtnEffect) {
-        ui->btnStopSend->setGraphicsEffect(nullptr);
+        ui->btnPktAddStartTask->setGraphicsEffect(nullptr);
         stopBtnEffect = nullptr;
     }
 }
@@ -1676,13 +1816,21 @@ void MainWindow::loadConfig() {
         }
     }
 
-    // 4. 恢复顶部水平分割 (Left : Mid : Right)
+    // 4. 恢复顶部水平分割 (PktSender : OsSender : TaskManager : Monitor)
     if (ui->splitterTopHorizontal) {
         if (settings.contains("window/splitter_top_horz_state")) {
             ui->splitterTopHorizontal->restoreState(settings.value("window/splitter_top_horz_state").toByteArray());
         } else {
-            // 默认宽度比例：1 : 1 : 1
-            ui->splitterTopHorizontal->setSizes(QList<int>() << 400 << 400 << 400);
+            // 默认宽度比例：1 : 1 : 1 : 1.5
+            ui->splitterTopHorizontal->setSizes(QList<int>() << 300 << 300 << 300 << 450);
+        }
+    }
+
+    // 5. 恢复主流量表列宽
+    if (m_packetTableView && settings.contains("window/table_column_widths")) {
+        QList<int> widths = settings.value("window/table_column_widths").value<QList<int>>();
+        for (int i = 0; i < widths.size() && i < 7; ++i) {
+            m_packetTableView->setColumnWidth(i, widths[i]);
         }
     }
 
@@ -1977,9 +2125,18 @@ void MainWindow::saveConfig() {
         settings.setValue("window/splitter_main_vert_state", ui->splitterMainVertical->saveState());
     }
 
-    // 3. 保存顶部水平分割 (Config/Monitor/OS) 的比例
+    // 3. 保存顶部水平分割 (Config/Monitor/OS/TaskManager) 的比例
     if (ui->splitterTopHorizontal) {
         settings.setValue("window/splitter_top_horz_state", ui->splitterTopHorizontal->saveState());
+    }
+
+    // 4. 保存主流量表 (tablePackets) 的列宽
+    if (m_packetTableView) {
+        QList<int> widths;
+        for (int i = 0; i < 7; ++i) { // PacketTableModel 有 7 列
+            widths << m_packetTableView->columnWidth(i);
+        }
+        settings.setValue("window/table_column_widths", QVariant::fromValue(widths));
     }
 
     // 保存 WinPcap 模块配置
@@ -2175,22 +2332,8 @@ void MainWindow::setupHexTableStyle() {
     ui->tableHex->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
     ui->tableHex->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
 
-    // 4. 设置样式表
-    ui->tableHex->setStyleSheet(R"(
-        QTableWidget {
-            background-color: #080a10;
-            border: 1px solid #1c2333;
-            outline: none;
-            padding-left: 5px; /* 整体左边距 */
-        }
-        QTableWidget::item {
-            padding-top: 0px;    /* 极度紧凑 */
-            padding-bottom: 0px;
-        }
-        QTableWidget::item:selected {
-            background-color: #1a202c;
-        }
-    )");
+    // 4. 设置样式表 (已在 .ui 文件中统一管理)
+    ui->tableHex->setObjectName("tableHex");
 
     // 5. 安装代理和过滤器 (保持不变)
     m_hexDelegate = new HexRenderDelegate(this);
@@ -2325,6 +2468,35 @@ void MainWindow::updateHexTableContent(const QByteArray& data) {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    // [新增] 为任务管理器的三个控制按钮实现悬停发光动画
+    if (QPushButton* btn = qobject_cast<QPushButton*>(watched)) {
+        QString text = btn->text();
+        if (text == "Start All" || text == "Stop All" || text == "Clear All") {
+            if (event->type() == QEvent::Enter) {
+                QGraphicsDropShadowEffect* glow = new QGraphicsDropShadowEffect(btn);
+                glow->setOffset(0, 0);
+                glow->setBlurRadius(15);
+                
+                // 根据按钮文字设置发光颜色
+                if (text == "Start All") glow->setColor(QColor("#00e676"));
+                else if (text == "Stop All") glow->setColor(QColor("#ff1744"));
+                else glow->setColor(QColor("#00f0ff"));
+                
+                btn->setGraphicsEffect(glow);
+                
+                // 属性动画让光晕跳动
+                QPropertyAnimation* anim = new QPropertyAnimation(glow, "blurRadius");
+                anim->setDuration(400);
+                anim->setStartValue(10);
+                anim->setEndValue(25);
+                anim->setEasingCurve(QEasingCurve::OutQuad);
+                anim->start(QAbstractAnimation::DeleteWhenStopped);
+            } else if (event->type() == QEvent::Leave) {
+                btn->setGraphicsEffect(nullptr);
+            }
+        }
+    }
+
     // [新增] 拦截ToolTip事件，阻止默认弹窗显示，但保留状态栏显示
     if (event->type() == QEvent::ToolTip) {
         QWidget* widget = qobject_cast<QWidget*>(watched);
@@ -2441,76 +2613,64 @@ void MainWindow::setupResourceMonitor() {
 
     // 创建容器
     m_resourceContainer = new QWidget();
-    m_resourceContainer->setStyleSheet("background: transparent;");
+    m_resourceContainer->setObjectName("resourceContainer");
     QHBoxLayout* resourceLayout = new QHBoxLayout(m_resourceContainer);
-    resourceLayout->setContentsMargins(10, 5, 10, 5);
-    resourceLayout->setSpacing(20);
+    resourceLayout->setContentsMargins(5, 8, 5, 8);
+    resourceLayout->setSpacing(5); // 减小间距
     resourceLayout->addStretch();
 
     // 创建 CPU 监控组件
     m_cpuWidget = new CircularProgressWidget(m_resourceContainer);
     m_cpuWidget->setLabel("CPU");
     m_cpuWidget->setUnit("%");
-    m_cpuWidget->setColor(QColor("#00e676")); // 绿色
+    m_cpuWidget->setColor(QColor("#00e676")); 
     resourceLayout->addWidget(m_cpuWidget);
 
     // 创建内存监控组件
     m_memoryWidget = new CircularProgressWidget(m_resourceContainer);
-    m_memoryWidget->setLabel("Memory");
+    m_memoryWidget->setLabel("RAM"); // 缩写以节省空间
     m_memoryWidget->setUnit("%");
-    m_memoryWidget->setColor(QColor("#d500f9")); // 紫色
+    m_memoryWidget->setColor(QColor("#d500f9")); 
     resourceLayout->addWidget(m_memoryWidget);
 
     // 创建上传速率监控组件
-    // 注意：显示的是整个网卡的总上传流量（包括本应用、其他应用、系统流量等）
     m_uploadWidget = new CircularProgressWidget(m_resourceContainer);
-    m_uploadWidget->setLabel("Upload");
+    m_uploadWidget->setLabel("Up");
     m_uploadWidget->setUnit("MB/s");
-    m_uploadWidget->setColor(QColor("#ff6d00")); // 橙色
-    m_uploadWidget->setToolTip("网卡总上传流量（包括本应用、其他应用和系统流量）");
+    m_uploadWidget->setColor(QColor("#ff6d00")); 
     resourceLayout->addWidget(m_uploadWidget);
 
     // 创建下载速率监控组件
-    // 注意：显示的是整个网卡的总下载流量（包括 ICMP 响应、其他应用流量等）
     m_downloadWidget = new CircularProgressWidget(m_resourceContainer);
-    m_downloadWidget->setLabel("Download");
+    m_downloadWidget->setLabel("Down");
     m_downloadWidget->setUnit("MB/s");
-    m_downloadWidget->setColor(QColor("#00bcd4")); // 青色
-    m_downloadWidget->setToolTip("网卡总下载流量（包括 ICMP 响应、其他应用和系统流量）");
+    m_downloadWidget->setColor(QColor("#00bcd4")); 
     resourceLayout->addWidget(m_downloadWidget);
 
-    // 创建已发送统计显示容器（上下排列：包数量在上，字节在下）
-    QWidget* statsContainer = new QWidget(m_resourceContainer);
-    statsContainer->setStyleSheet("background: transparent;");
-    QVBoxLayout* statsLayout = new QVBoxLayout(statsContainer);
-    statsLayout->setContentsMargins(10, 5, 10, 5);
-    statsLayout->setSpacing(8);
+    resourceLayout->addSpacing(10);
 
-    // 标题
-    QLabel* statsTitle = new QLabel("Sent", statsContainer);
-    statsTitle->setStyleSheet("color: #718096; font-size: 10px; font-weight: bold;");
-    statsTitle->setAlignment(Qt::AlignCenter);
+    // 创建已发送统计显示容器
+    QWidget* statsContainer = new QWidget(m_resourceContainer);
+    QVBoxLayout* statsLayout = new QVBoxLayout(statsContainer);
+    statsLayout->setContentsMargins(10, 0, 10, 0);
+    statsLayout->setSpacing(2);
+
+    QLabel* statsTitle = new QLabel("TOTAL SENT", statsContainer);
+    statsTitle->setObjectName("lblStatsTitle");
+    statsTitle->setAlignment(Qt::AlignLeft | Qt::AlignBottom);
     statsLayout->addWidget(statsTitle);
 
-    // 已发送包数量（上面，显示原始值，不缩写，带单位）
-    m_packetsLabel = new QLabel("0 packets", statsContainer);
-    m_packetsLabel->setStyleSheet("color: #00e676; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono';");
-    m_packetsLabel->setAlignment(Qt::AlignCenter);
-    m_packetsLabel->setToolTip("本应用程序已发送的数据包总数");
-    m_packetsLabel->setWordWrap(false);
+    m_packetsLabel = new QLabel("0 pkts", statsContainer);
+    m_packetsLabel->setObjectName("lblPacketsTotal");
+    m_packetsLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     statsLayout->addWidget(m_packetsLabel);
 
-    // 已发送字节（下面）
     m_bytesLabel = new QLabel("0 B", statsContainer);
-    m_bytesLabel->setStyleSheet("color: #00f0ff; font-size: 14px; font-weight: bold; font-family: 'JetBrains Mono';");
-    m_bytesLabel->setAlignment(Qt::AlignCenter);
-    m_bytesLabel->setToolTip("本应用程序已发送的字节总数");
-    m_bytesLabel->setWordWrap(false);
+    m_bytesLabel->setObjectName("lblBytesTotal");
+    m_bytesLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     statsLayout->addWidget(m_bytesLabel);
 
-    // 设置固定宽度，确保文字不会被截断
-    statsContainer->setMinimumWidth(120);
-    statsContainer->setMaximumWidth(150);
+    statsContainer->setFixedWidth(120); 
     resourceLayout->addWidget(statsContainer);
 
     resourceLayout->addStretch();
@@ -2664,13 +2824,13 @@ void MainWindow::setupTooltips() {
     }
 
     // 按钮
-    if (ui->btnStartSend) {
-        ui->btnStartSend->setToolTip("开始发送数据包\n"
-                                     "点击后将根据当前配置开始发送数据包");
+    if (ui->btnPktAddTask) {
+        ui->btnPktAddTask->setToolTip("添加发送任务但不启动\n"
+                                     "点击后将在任务管理器中创建一个新的停止状态任务");
     }
-    if (ui->btnStopSend) {
-        ui->btnStopSend->setToolTip("停止发送数据包\n"
-                                    "点击后将停止当前的数据包发送任务");
+    if (ui->btnPktAddStartTask) {
+        ui->btnPktAddStartTask->setToolTip("添加并立即开始发送任务\n"
+                                    "点击后将创建一个新任务并立即启动发送线程");
     }
 
     // Socket发送模块
@@ -2702,12 +2862,13 @@ void MainWindow::setupTooltips() {
         ui->spinSockInt->setToolTip("Socket发送间隔（微秒，µs）\n"
                                     "控制Socket模式下的发送速率");
     }
-    if (ui->btnSockStart) {
-        ui->btnSockStart->setToolTip("开始Socket发送\n"
-                                     "使用操作系统网络栈发送数据包");
+    if (ui->btnSockAddTask) {
+        ui->btnSockAddTask->setToolTip("添加Socket发送任务\n"
+                                     "点击后将在任务管理器中创建一个新的停止状态任务");
     }
-    if (ui->btnSockStop) {
-        ui->btnSockStop->setToolTip("停止Socket发送");
+    if (ui->btnSockAddStartTask) {
+        ui->btnSockAddStartTask->setToolTip("添加并开始Socket发送\n"
+                                     "点击后将创建一个新任务并立即开始发送");
     }
 
     // 图表和监控
@@ -2827,7 +2988,7 @@ void MainWindow::updateStatsDisplay(uint64_t sent, uint64_t bytes) {
     if (m_packetsLabel) {
         QLocale loc(QLocale::English);
         // 直接显示完整数字，带千位分隔符，后面加单位
-        QString packetsText = loc.toString((qulonglong)sent) + " packets";
+        QString packetsText = loc.toString((qulonglong)sent) + " pkts";
         m_packetsLabel->setText(packetsText);
     }
 

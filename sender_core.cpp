@@ -687,19 +687,26 @@ void run_burst_mode(pcap_t* fp, const SenderConfig* cfg) {
     uint64_t bytes_per_batch = (uint64_t)packet_len * actual_queued_packs;
     auto last_stats_time = std::chrono::steady_clock::now();
 
-    while (g_is_sending) {
+    uint64_t local_total_sent = 0;
+    uint64_t local_total_bytes = 0;
+
+    while (cfg->stop_flag ? !cfg->stop_flag->load() : g_is_sending.load()) {
         pcap_sendqueue_transmit(fp, squeue, 0);
+        local_total_sent += actual_queued_packs;
+        local_total_bytes += bytes_per_batch;
+        
+        // 更新全局统计（可选，保持兼容性）
         g_total_sent += actual_queued_packs;
         g_total_bytes += bytes_per_batch;
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count();
         if (elapsed_ms >= PacketConfig::STATS_UPDATE_INTERVAL_MS) {
-            if (cfg->stats_callback) cfg->stats_callback(g_total_sent, g_total_bytes);
+            if (cfg->stats_callback) cfg->stats_callback(local_total_sent, local_total_bytes, cfg->user_data);
             last_stats_time = now;
         }
     }
-    if (cfg->stats_callback) cfg->stats_callback(g_total_sent, g_total_bytes);
+    if (cfg->stats_callback) cfg->stats_callback(local_total_sent, local_total_bytes, cfg->user_data);
     pcap_sendqueue_destroy(squeue);
 }
 
@@ -725,7 +732,10 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
     tv.tv_sec = 0;
     tv.tv_usec = 0;
 
-    while (g_is_sending) {
+    uint64_t local_total_sent = 0;
+    uint64_t local_total_bytes = 0;
+
+    while (cfg->stop_flag ? !cfg->stop_flag->load() : g_is_sending.load()) {
         next_batch_time += std::chrono::microseconds(batch_duration_us);
         squeue->len = 0;
         uint64_t batch_bytes = 0;
@@ -759,14 +769,18 @@ void run_normal_mode(pcap_t* fp, const SenderConfig* cfg) {
 
         // 每批只调用一次 Hex 回调，传递最后一个包
         if (cfg->hex_callback && has_last_packet && last_packet_len > 0) {
-            cfg->hex_callback(last_packet_buffer.data(), last_packet_len);
+            cfg->hex_callback(last_packet_buffer.data(), last_packet_len, cfg->user_data);
         }
 
         if (squeue->len > 0) pcap_sendqueue_transmit(fp, squeue, 1);
+        local_total_sent += actual_sent_packs;
+        local_total_bytes += batch_bytes;
+        
+        // 更新全局统计
         g_total_sent += actual_sent_packs;
         g_total_bytes += batch_bytes;
 
-        if (cfg->stats_callback) cfg->stats_callback(g_total_sent, g_total_bytes);
+        if (cfg->stats_callback) cfg->stats_callback(local_total_sent, local_total_bytes, cfg->user_data);
         auto now = std::chrono::steady_clock::now();
         if (now < next_batch_time) {
             auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(next_batch_time - now).count();
@@ -798,7 +812,7 @@ extern "C" void start_send_mode(const SenderConfig* config) {
     if (!config || !config->dev_name[0]) {
         // [优化] 错误处理增强：通过回调通知 UI
         if (config && config->error_callback) {
-            config->error_callback("Invalid configuration: device name is empty");
+            config->error_callback("Invalid configuration: device name is empty", config->user_data);
         }
         return;
     }
@@ -810,7 +824,7 @@ extern "C" void start_send_mode(const SenderConfig* config) {
         std::string error_msg = std::string("pcap_open failed: ") + errbuf;
         std::cerr << "[ERROR] " << error_msg << std::endl;
         if (config->error_callback) {
-            config->error_callback(error_msg.c_str());
+            config->error_callback(error_msg.c_str(), config->user_data);
         }
         return;
     }
@@ -833,7 +847,7 @@ extern "C" void start_send_mode(const SenderConfig* config) {
         if (config->log_callback) {                                                                                    \
             char buf[512];                                                                                             \
             snprintf(buf, sizeof(buf), fmt, ##__VA_ARGS__);                                                            \
-            config->log_callback(buf, level);                                                                          \
+            config->log_callback(buf, level, config->user_data);                                                       \
         }                                                                                                              \
     } while (0)
 
@@ -892,10 +906,14 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
         unsigned char packet[1500];
         int pkg_len = 0;
         int seq = 0;
+        uint64_t local_sent = 0;
+        uint64_t local_bytes = 0;
 
-        while (g_is_sock_sending) {
+        while (config->stop_flag ? !config->stop_flag->load() : g_is_sock_sending.load()) {
             build_package(packet, &pkg_len, seq++, &raw_cfg);
             if (pcap_sendpacket(adhandle, packet, pkg_len) == 0) {
+                local_sent++;
+                local_bytes += pkg_len;
                 g_sock_total_sent++;
                 g_sock_total_bytes += pkg_len;
             }
@@ -907,10 +925,12 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
             auto now = std::chrono::steady_clock::now();
             static auto last_stats_time = now;
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count() >= 30) {
-                if (config->stats_callback) config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+                if (config->stats_callback) config->stats_callback(local_sent, local_bytes, config->user_data);
                 last_stats_time = now;
             }
         }
+
+        if (config->stats_callback) config->stats_callback(local_sent, local_bytes, config->user_data);
 
         pcap_close(adhandle);
         WSACleanup();
@@ -921,7 +941,10 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
     if (!config->is_udp && config->is_connect_only) {
         LOG_SOCK(1, "[SOCK] Mode: TCP Connect Flood (Complete Lifecycle)");
         
-        while (g_is_sock_sending) {
+        uint64_t local_sent = 0;
+        uint64_t local_bytes = 0;
+
+        while (config->stop_flag ? !config->stop_flag->load() : g_is_sock_sending.load()) {
             SOCKET sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (sockfd == INVALID_SOCKET) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -988,6 +1011,8 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
                 std::vector<char> temp_buf(data_len, 'X');
                 send(sockfd, temp_buf.data(), data_len, 0);
                 
+                local_sent++;
+                local_bytes += data_len;
                 g_sock_total_sent++;
                 g_sock_total_bytes += data_len;
             }
@@ -999,7 +1024,7 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
             auto now = std::chrono::steady_clock::now();
             static auto last_stats_time = now;
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count() >= 30) {
-                if (config->stats_callback) config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+                if (config->stats_callback) config->stats_callback(local_sent, local_bytes, config->user_data);
                 last_stats_time = now;
             }
 
@@ -1009,6 +1034,7 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
             }
         }
         
+        if (config->stats_callback) config->stats_callback(local_sent, local_bytes, config->user_data);
         WSACleanup();
         return;
     }
@@ -1060,7 +1086,7 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
             if (err == WSAEWOULDBLOCK) {
                 int max_retries = PacketConfig::TCP_CONNECT_MAX_RETRIES;
                 for (int i = 0; i < max_retries; ++i) {
-                    if (!g_is_sock_sending) break;
+                    if (config->stop_flag ? config->stop_flag->load() : !g_is_sock_sending.load()) break;
                     fd_set write_fds, except_fds;
                     FD_ZERO(&write_fds);
                     FD_SET(sockfd, &write_fds);
@@ -1097,7 +1123,10 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
     auto next_send_time = std::chrono::steady_clock::now();
     bool is_burst = (config->interval_us == 0);
 
-    while (g_is_sock_sending) {
+    uint64_t local_sent = 0;
+    uint64_t local_bytes = 0;
+
+    while (config->stop_flag ? !config->stop_flag->load() : g_is_sock_sending.load()) {
         int sent = -1;
         if (config->is_udp) {
             sent = sendto(sockfd, send_buffer.data(), data_len, 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
@@ -1106,6 +1135,8 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
         }
 
         if (sent > 0) {
+            local_sent++;
+            local_bytes += sent;
             g_sock_total_sent++;
             g_sock_total_bytes += sent;
         } else {
@@ -1120,7 +1151,7 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
         if (config->stats_callback) {
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stats_time).count();
             if (elapsed_ms >= 30) {
-                config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+                config->stats_callback(local_sent, local_bytes, config->user_data);
                 last_stats_time = now;
             }
         }
@@ -1131,11 +1162,10 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
                 auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(next_send_time - now).count();
                 constexpr int LONG_SLEEP_THRESHOLD_US = 100000; // 长睡眠阈值（100ms）
                 if (wait_us > LONG_SLEEP_THRESHOLD_US) {
-                    while (wait_us > 0 && g_is_sock_sending) {
+                    while (wait_us > 0 && (config->stop_flag ? !config->stop_flag->load() : g_is_sock_sending.load())) {
                         int sleep_slice = (wait_us > LONG_SLEEP_THRESHOLD_US) ? LONG_SLEEP_THRESHOLD_US : wait_us;
                         std::this_thread::sleep_for(std::chrono::microseconds(sleep_slice));
                         wait_us -= sleep_slice;
-                        if (!g_is_sock_sending) break;
                     }
                 } else {
                     if (wait_us > PacketConfig::MIN_SLEEP_THRESHOLD_US)
@@ -1150,7 +1180,7 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
         }
     }
 
-    if (config->stats_callback) config->stats_callback(g_sock_total_sent, g_sock_total_bytes);
+    if (config->stats_callback) config->stats_callback(local_sent, local_bytes, config->user_data);
     closesocket(sockfd);
     WSACleanup();
 }

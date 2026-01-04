@@ -368,8 +368,8 @@ int SystemResourceMonitor::findAdapterIndexByIp(const QString& ipAddress) {
 // ============================================================================
 CircularProgressWidget::CircularProgressWidget(QWidget* parent)
     : QWidget(parent), m_value(0.0), m_label(""), m_unit("%"), m_color(QColor("#00e676")) {
-    setMinimumSize(120, 120);
-    setMaximumSize(150, 150);
+    setMinimumSize(80, 80);
+    setMaximumSize(120, 120);
 }
 
 void CircularProgressWidget::setValue(double value) {
@@ -404,141 +404,101 @@ void CircularProgressWidget::paintEvent(QPaintEvent* event) {
     painter.setRenderHint(QPainter::Antialiasing);
 
     QRect rect = this->rect();
-    int size = qMin(rect.width(), rect.height());
+    // 留出边距避免切边
+    int margin = 5;
+    int size = qMin(rect.width(), rect.height()) - margin * 2;
     QRect circleRect((rect.width() - size) / 2, (rect.height() - size) / 2, size, size);
+
+    // 计算圆环粗细，随尺寸调整
+    int strokeWidth = qMax(6, size / 10);
 
     // 绘制背景圆环（深色背景）
     QPen bgPen(QColor("#1c2333"));
-    bgPen.setWidth(12);
+    bgPen.setWidth(strokeWidth);
     bgPen.setCapStyle(Qt::RoundCap);
     painter.setPen(bgPen);
-    QRect bgRect = circleRect.adjusted(6, 6, -6, -6);
-    painter.drawArc(bgRect, 0, 5760); // 360度 * 16
+    QRect arcRect = circleRect.adjusted(strokeWidth/2, strokeWidth/2, -strokeWidth/2, -strokeWidth/2);
+    painter.drawArc(arcRect, 0, 5760); 
 
-    // 绘制进度圆环（对于速率，使用不同的显示方式）
-    if (m_unit == "%") {
-        // 百分比：显示 0-100 的进度
-        drawCircularProgress(painter, circleRect, m_value, m_color);
-    } else {
-        // 速率或统计数据：根据单位选择不同的最大值来计算进度
-        double maxValue;
-        if (m_unit == "KB/s") {
-            maxValue = 1024.0; // 1024 KB/s = 1 MB/s
-        } else if (m_unit == "MB/s") {
-            maxValue = 100.0; // 100 MB/s
-        } else if (m_unit == "GB/s") {
-            maxValue = 1.0; // 1 GB/s
-        } else if (m_unit == "K" || m_unit == "M" || m_unit == "B") {
-            // 包数显示：K=1000, M=1000000, B=1000000000
-            if (m_unit == "K") {
-                maxValue = 1000.0; // 1000K = 1M
-            } else if (m_unit == "M") {
-                maxValue = 100.0; // 100M
-            } else if (m_unit == "B") {
-                maxValue = 10.0; // 10B
-            } else {
-                maxValue = 1000.0;
-            }
-        } else if (m_unit == "KB" || m_unit == "MB" || m_unit == "GB") {
-            // 字节数显示：KB=1024KB, MB=1024MB, GB=10GB
-            if (m_unit == "KB") {
-                maxValue = 1024.0; // 1024 KB = 1 MB
-            } else if (m_unit == "MB") {
-                maxValue = 1024.0; // 1024 MB = 1 GB
-            } else if (m_unit == "GB") {
-                maxValue = 10.0; // 10 GB
-            } else {
-                maxValue = 1024.0;
-            }
-        } else if (m_unit.isEmpty()) {
-            // 无单位（包数小于1000或字节数小于1KB），使用固定最大值
-            maxValue = 1000.0;
-        } else {
-            maxValue = 100.0; // 默认值
-        }
-        double progressPercent = qMin(100.0, (m_value / maxValue) * 100.0);
-        drawCircularProgress(painter, circleRect, progressPercent, m_color);
+    // 绘制进度圆环
+    double maxValue = 100.0;
+    if (m_unit != "%") {
+        if (m_unit == "KB/s") maxValue = 1024.0;
+        else if (m_unit == "MB/s") maxValue = 100.0;
+        else if (m_unit == "GB/s") maxValue = 1.0;
+        else if (m_unit == "K") maxValue = 1000.0;
+        else if (m_unit == "M") maxValue = 100.0;
+        else if (m_unit == "B") maxValue = 10.0;
+        else if (m_unit == "KB") maxValue = 1024.0;
+        else if (m_unit == "MB") maxValue = 1024.0;
+        else if (m_unit == "GB") maxValue = 10.0;
+        else if (m_unit.isEmpty()) maxValue = 1000.0;
+    }
+    double progressPercent = (m_unit == "%") ? m_value : qMin(100.0, (m_value / maxValue) * 100.0);
+    
+    if (progressPercent > 0) {
+        // 计算角度
+        constexpr int START_ANGLE = 90 * 16;
+        int spanAngle = -(int)(progressPercent / 100.0 * 360 * 16);
+
+        // 渐变效果
+        QConicalGradient gradient(circleRect.center(), 90);
+        gradient.setColorAt(0.0, m_color);
+        gradient.setColorAt(1.0, m_color.darker(150));
+
+        QPen progressPen(QBrush(gradient), strokeWidth);
+        progressPen.setCapStyle(Qt::RoundCap);
+        painter.setPen(progressPen);
+        painter.drawArc(arcRect, START_ANGLE, spanAngle);
     }
 
-    // 绘制文本
-    QFont labelFont("JetBrains Mono", 9, QFont::Bold);
+    // --- 绘制文本 ---
+    // 标签文本（顶部，较小）
+    QFont labelFont("JetBrains Mono", qMax(7, size / 12), QFont::Medium);
     painter.setFont(labelFont);
+    painter.setPen(QColor("#718096"));
+    QRect labelRect = circleRect;
+    labelRect.setTop(circleRect.center().y() - size/4 - 5);
+    labelRect.setHeight(size/4);
+    painter.drawText(labelRect, Qt::AlignCenter, m_label);
 
-    // 标签文本（顶部）
-    if (!m_label.isEmpty()) {
-        painter.setPen(QColor("#718096"));
-        QRect labelRect = circleRect;
-        labelRect.setTop(circleRect.center().y() - 25);
-        labelRect.setHeight(20);
-        painter.drawText(labelRect, Qt::AlignCenter, m_label);
-    }
-
-    // 数值文本（中心）
-    QFont valueFont("JetBrains Mono", 18, QFont::Bold);
+    // 数值文本（中心，较大）
+    QFont valueFont("JetBrains Mono", qMax(9, size / 5), QFont::Bold);
     painter.setFont(valueFont);
     painter.setPen(m_color);
-    // 根据单位选择合适的小数位数
+    
     QString valueText;
-    if (m_unit == "%") {
-        valueText = QString::number(m_value, 'f', 1);
-    } else if (m_unit == "KB/s") {
-        // KB/s 显示 1 位小数
-        valueText = QString::number(m_value, 'f', 1);
-    } else if (m_unit == "MB/s") {
-        // MB/s 显示 2 位小数（更精确）
-        valueText = QString::number(m_value, 'f', 2);
-    } else if (m_unit == "GB/s") {
-        // GB/s 显示 3 位小数
-        valueText = QString::number(m_value, 'f', 3);
-    } else if (m_unit == "K" || m_unit == "M" || m_unit == "B") {
-        // 包数：K/M/B 显示 2 位小数
-        valueText = QString::number(m_value, 'f', 2);
-    } else if (m_unit == "KB" || m_unit == "MB" || m_unit == "GB") {
-        // 字节数：KB/MB/GB 显示 2 位小数
-        valueText = QString::number(m_value, 'f', 2);
-    } else if (m_unit.isEmpty()) {
-        // 无单位（包数小于1000或字节数小于1KB），显示整数
-        valueText = QString::number((int)m_value);
-    } else {
-        valueText = QString::number(m_value, 'f', 1);
+    if (m_unit == "%") valueText = QString::number(m_value, 'f', 1);
+    else if (m_unit == "MB/s") valueText = QString::number(m_value, 'f', 1); 
+    else if (m_unit == "KB/s") valueText = QString::number((int)m_value);
+    else if (m_unit.isEmpty()) valueText = QString::number((int)m_value);
+    else valueText = QString::number(m_value, 'f', 1);
+
+    // 自动缩放字体大小以适应宽度
+    int textWidth = painter.fontMetrics().horizontalAdvance(valueText);
+    if (textWidth > size * 0.8) {
+        QFont smallerFont = valueFont;
+        smallerFont.setPointSizeF(valueFont.pointSizeF() * (size * 0.8 / textWidth));
+        painter.setFont(smallerFont);
     }
+
     QRect valueRect = circleRect;
-    valueRect.setTop(circleRect.center().y() - 5);
-    valueRect.setHeight(25);
+    valueRect.setTop(circleRect.center().y() - size/8);
+    valueRect.setHeight(size/3);
     painter.drawText(valueRect, Qt::AlignCenter, valueText);
 
-    // 单位文本（底部）
-    QFont unitFont("JetBrains Mono", 8);
+    // 单位文本（底部，较小）
+    QFont unitFont("JetBrains Mono", qMax(6, size / 15));
     painter.setFont(unitFont);
-    painter.setPen(QColor("#718096"));
+    painter.setPen(QColor("#4a5568"));
     QRect unitRect = circleRect;
-    unitRect.setTop(circleRect.center().y() + 18);
-    unitRect.setHeight(15);
+    unitRect.setTop(circleRect.center().y() + size/5);
+    unitRect.setHeight(size/5);
     painter.drawText(unitRect, Qt::AlignCenter, m_unit);
 }
 
 void CircularProgressWidget::drawCircularProgress(QPainter& painter, const QRect& rect, double value,
                                                   const QColor& color) {
-    if (value <= 0.0) return;
-
-    // 计算角度（从顶部开始，顺时针）
-    constexpr int START_ANGLE = 90 * 16;              // 顶部 = 90度 * 16（Qt使用1/16度为单位）
-    int spanAngle = -(int)(value / 100.0 * 360 * 16); // 负值表示顺时针
-
-    QRect arcRect = rect.adjusted(6, 6, -6, -6);
-
-    // 使用渐变效果创建更现代化的外观
-    QConicalGradient gradient(rect.center(), 90);
-    QColor startColor = color;
-    QColor endColor = color.lighter(130);
-    gradient.setColorAt(0.0, startColor);
-    gradient.setColorAt(0.5, color);
-    gradient.setColorAt(1.0, endColor);
-
-    QPen progressPen(QBrush(gradient), 12);
-    progressPen.setCapStyle(Qt::RoundCap);
-    progressPen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(progressPen);
-
-    painter.drawArc(arcRect, START_ANGLE, spanAngle);
+    // 该函数已被合并到 paintEvent 中以优化性能和一致性
+    Q_UNUSED(painter); Q_UNUSED(rect); Q_UNUSED(value); Q_UNUSED(color);
 }

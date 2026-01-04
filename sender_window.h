@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QGraphicsDropShadowEffect>
+#include <QGroupBox>
 #include <QHostAddress>
 #include <QLabel>
 #include <QLocale>
@@ -13,6 +14,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QScrollArea>
 #include <QStatusBar>
 #include <QThread>
 #include <QTimer>
@@ -111,9 +113,9 @@ struct StatusDashboard {
         lblBytes = new QLabel("Data: 0 B", parent);
         lblRate = new QLabel("Speed: 0 pps | 0 B/s", parent);
 
-        lblCount->setFixedWidth(150);
-        lblBytes->setFixedWidth(150);
-        lblRate->setFixedWidth(400);
+        lblCount->setMinimumWidth(150);
+        lblBytes->setMinimumWidth(150);
+        lblRate->setMinimumWidth(400);
 
         lblCount->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         lblBytes->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -178,34 +180,32 @@ class PacketWorker : public QObject {
     SenderConfig config;
     QByteArray customDataBuffer;
 
-    static void StatsCallbackProxy(uint64_t sent, uint64_t bytes) {
-        if (m_instance) {
-            emit m_instance->statsUpdated(sent, bytes);
+    static void StatsCallbackProxy(uint64_t sent, uint64_t bytes, void* user_data) {
+        PacketWorker* self = static_cast<PacketWorker*>(user_data);
+        if (self) {
+            emit self->statsUpdated(sent, bytes);
         }
     }
 
     // [新增] Hex 代理函数
-    static void HexCallbackProxy(const unsigned char* data, int len) {
-        if (m_instance) {
-            // 原代码：int showLen = (len > 48) ? 48 : len;
-            // 修改后：直接使用 len，或者设置一个非常大的上限（如 65535）防止极个别情况崩溃
-            // 但通常直接发完整包即可，因为以太网包最大也就 1500 左右
-
+    static void HexCallbackProxy(const unsigned char* data, int len, void* user_data) {
+        PacketWorker* self = static_cast<PacketWorker*>(user_data);
+        if (self) {
             QByteArray b((const char*)data, len);
-            emit m_instance->hexUpdated(b);
+            emit self->hexUpdated(b);
         }
     }
 
     // [新增] 错误回调代理函数
-    static void ErrorCallbackProxy(const char* error_msg) {
-        if (m_instance) {
-            emit m_instance->errorOccurred(QString::fromLocal8Bit(error_msg));
+    static void ErrorCallbackProxy(const char* error_msg, void* user_data) {
+        PacketWorker* self = static_cast<PacketWorker*>(user_data);
+        if (self) {
+            emit self->errorOccurred(QString::fromLocal8Bit(error_msg));
         }
     }
 
-  public slots:
+    public slots:
     void doSendWork() {
-        m_instance = this;
         if (config.payload_mode == PAYLOAD_CUSTOM) {
             config.custom_data = customDataBuffer.constData();
             config.custom_data_len = customDataBuffer.length();
@@ -214,26 +214,24 @@ class PacketWorker : public QObject {
             config.custom_data_len = 0;
         }
         config.stats_callback = &PacketWorker::StatsCallbackProxy;
-        // [新增] 注册回调
         config.hex_callback = &PacketWorker::HexCallbackProxy;
-        // [新增] 注册错误回调
         config.error_callback = &PacketWorker::ErrorCallbackProxy;
+        config.user_data = this;
 
-        g_is_sending = true;
+        if (!config.stop_flag) {
+            static std::atomic<bool> default_stop{false};
+            config.stop_flag = &default_stop;
+        }
+        config.stop_flag->store(false);
+
         start_send_mode(&config);
-        m_instance = nullptr;
         emit workFinished();
     }
   signals:
     void workFinished();
     void statsUpdated(uint64_t sent, uint64_t bytes);
-    // [新增] 信号
     void hexUpdated(QByteArray data);
-    // [新增] 错误信号
     void errorOccurred(QString error_msg);
-
-  private:
-    static PacketWorker* m_instance;
 };
 // ============================================================================
 // sender_window.h -> SocketWorker 类完整定义
@@ -242,44 +240,77 @@ class SocketWorker : public QObject {
     Q_OBJECT
   public:
     SocketConfig config;
-    static SocketWorker* m_instance;
 
     // 统计数据代理
-    static void StatsCallbackProxy(uint64_t sent, uint64_t bytes) {
-        if (m_instance) {
-            emit m_instance->statsUpdated(sent, bytes);
+    static void StatsCallbackProxy(uint64_t sent, uint64_t bytes, void* user_data) {
+        SocketWorker* self = static_cast<SocketWorker*>(user_data);
+        if (self) {
+            emit self->statsUpdated(sent, bytes);
         }
     }
 
     // [新增] 日志数据代理
-    static void LogCallbackProxy(const char* msg, int level) {
-        if (m_instance) {
-            // 将 C-Style 字符串转为 Qt 字符串并跨线程发射
-            emit m_instance->logUpdated(QString::fromLocal8Bit(msg), level);
+    static void LogCallbackProxy(const char* msg, int level, void* user_data) {
+        SocketWorker* self = static_cast<SocketWorker*>(user_data);
+        if (self) {
+            emit self->logUpdated(QString::fromLocal8Bit(msg), level);
         }
     }
 
   public slots:
     void doWork() {
-        m_instance = this;
-
-        // 注册回调函数
         config.stats_callback = &SocketWorker::StatsCallbackProxy;
-        config.log_callback = &SocketWorker::LogCallbackProxy; // [新增]
+        config.log_callback = &SocketWorker::LogCallbackProxy;
+        config.user_data = this;
 
-        g_is_sock_sending = true;
+        if (!config.stop_flag) {
+            static std::atomic<bool> default_stop{false};
+            config.stop_flag = &default_stop;
+        }
+        config.stop_flag->store(false);
+
         start_socket_send_mode(&config);
-
-        m_instance = nullptr;
         emit workFinished();
     }
 
   signals:
     void workFinished();
     void statsUpdated(uint64_t sent, uint64_t bytes);
-
-    // [新增] 日志信号
     void logUpdated(QString msg, int level);
+};
+
+// ============================================================================
+// SendingTask 结构体 - [重构] 支持卡片式 UI
+// ============================================================================
+struct SendingTask {
+    QString taskId;
+    QString proto;
+    QString target;
+    uint64_t sentCount = 0;
+    uint64_t byteCount = 0;
+    uint64_t lastSentCount = 0;      // [新增] 用于计算单任务速率
+    QElapsedTimer lastUpdateTimer;   // [新增] 用于计算单任务速率
+    bool isRunning = false;
+    
+    QThread* thread = nullptr;
+    QObject* worker = nullptr; // 可以是 PacketWorker* 或 SocketWorker*
+    std::atomic<bool> stopFlag{false};
+
+    // [新增] UI 组件引用，用于直接更新
+    QWidget* cardWidget = nullptr;
+    QLabel* lblStats = nullptr;
+    QPushButton* btnStartStop = nullptr;
+
+    ~SendingTask() {
+        if (thread) {
+            stopFlag = true;
+            thread->quit();
+            thread->wait();
+            delete thread;
+        }
+        if (worker) delete worker;
+        // cardWidget 会由布局管理器在 parent widget 被销毁时自动删除
+    }
 };
 
 // ============================================================================
@@ -295,16 +326,24 @@ class MainWindow : public QMainWindow {
     void closeEvent(QCloseEvent* event) override; // [新增] 窗口关闭事件处理
 
   private slots:
-    void onStartSendClicked();
+    void onStartSendClicked(const QString& existingTaskId = "", bool startImmediately = true);
     void onStopSendClicked();
     void onProtoToggled();
     void onPayloadModeChanged();
     void updateStats(uint64_t currSent, uint64_t currBytes);
     void onInterfaceSelectionChanged(int index);
     void onGetDstMacClicked();
-    void onSockStartClicked();
+    void onSockStartClicked(const QString& existingTaskId = "", bool startImmediately = true);
     void onSockStopClicked();
     void updateSockStats(uint64_t sent, uint64_t bytes);
+
+    // [新增] 多任务相关槽函数
+    void onAddTaskClicked();
+    void onStartAllClicked();
+    void onStopAllClicked();
+    void onTaskStartStopClicked(const QString& taskId);
+    void onTaskRemoveClicked(const QString& taskId);
+    void updateTaskStats(const QString& taskId, uint64_t sent, uint64_t bytes);
 
   private:
     void loadInterfaces();
@@ -322,6 +361,13 @@ class MainWindow : public QMainWindow {
 
     void setupTrafficTable();
     void addPacketToTable(const QByteArray& data);
+
+    // [新增] 任务列表初始化
+    void setupTaskList();
+    void updateAggregateStats(); // [新增] 聚合统计槽函数
+
+    // [新增] 聚合统计相关定时器
+    QTimer* m_aggregateTimer; 
 
     // [新增] 辅助解析函数
     void parseMac(const QString& s, unsigned char* buf);
@@ -350,8 +396,19 @@ class MainWindow : public QMainWindow {
     int m_packetCount = 0; // 记录包序号
 
     Ui::MainWindow* ui;
+    
+    // [修改] 使用任务列表代替单一线程
+    QMap<QString, SendingTask*> m_tasks;
+    QScrollArea* m_taskScrollArea;
+    QVBoxLayout* m_taskContainerLayout;
+    QGroupBox* m_taskGroupBox; // [新增] 专门的任务管理容器
+
+    // 保留这些用于兼容旧代码或作为默认任务（可选）
     QThread* workerThread;
     PacketWorker* worker;
+    QThread* sockThread;
+    SocketWorker* sockWorker;
+
     QPropertyAnimation* stopBtnAnim;
     QGraphicsDropShadowEffect* stopBtnEffect;
     QTimer* statsTimer;
@@ -384,9 +441,6 @@ class MainWindow : public QMainWindow {
     qint64 m_chartTimeX;
     double m_maxPPS;
     double m_maxMbps;
-
-    QThread* sockThread;
-    SocketWorker* sockWorker;
 
     // [新增] 系统资源监控
     SystemResourceMonitor* m_resourceMonitor;
