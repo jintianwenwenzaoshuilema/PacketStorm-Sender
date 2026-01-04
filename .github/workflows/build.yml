@@ -18,7 +18,7 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.8.2'
+          version: '6.8.3'
           arch: 'win64_mingw'
           modules: 'qtcharts'
           tools: 'tools_mingw'
@@ -36,16 +36,14 @@ jobs:
           echo "Searching for MinGW in: $tools_dir"
           
           if ($tools_dir -and (Test-Path $tools_dir)) {
-              # 优先选择带版本号的 64 位目录（如 mingw1310_64），这些通常是较新的版本
-              $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*" | 
-                            Where-Object { $_.PSIsContainer -and $_.Name -match "mingw\d+.*_64" } | 
-                            Sort-Object Name -Descending | 
-                            Select-Object -First 1
+              # 优先搜索 mingw1310_64
+              $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw1310_64" | Where-Object { $_.PSIsContainer } | Select-Object -First 1
               
               if (-not $mingw_path) {
-                  # 兜底：选择任何名字匹配 mingw 的目录
-                  $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*" | 
+                  # 备选：搜索任何 mingw*64
+                  $mingw_path = Get-ChildItem -Path $tools_dir -Filter "mingw*_64" | 
                                 Where-Object { $_.PSIsContainer } | 
+                                Sort-Object Name -Descending | 
                                 Select-Object -First 1
               }
 
