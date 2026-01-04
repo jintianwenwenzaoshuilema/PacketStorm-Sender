@@ -21,13 +21,27 @@ jobs:
           version: '6.8.2'
           arch: 'win64_mingw'
           modules: 'qtcharts'
+          tools: 'tools_mingw'
+
+      - name: Set up MinGW
+        shell: pwsh
+        run: |
+          $qt_root = $env:QT_ROOT_DIR
+          $mingw_path = Get-ChildItem -Path "$qt_root\..\..\Tools" -Filter "mingw*" | Select-Object -First 1
+          if ($mingw_path) {
+              $bin_path = Join-Path $mingw_path.FullName "bin"
+              echo "Found MinGW: $bin_path"
+              echo "$bin_path" >> $env:GITHUB_PATH
+          } else {
+              echo "MinGW not found in Tools, trying default path"
+              "C:\Qt\Tools\mingw1310_64\bin" >> $env:GITHUB_PATH
+          }
 
       - name: Download WinPcap SDK (WpdPack)
         shell: powershell
         run: |
           Invoke-WebRequest -Uri "https://www.winpcap.org/install/bin/WpdPack_4_1_2.zip" -OutFile "WpdPack.zip"
           Expand-Archive -Path "WpdPack.zip" -DestinationPath "C:\"
-          # 检查解压后的目录名并重命名为 C:\WpdPack 以匹配 .pro 文件
           if (Test-Path "C:\WpdPack_4_1_2") {
               if (Test-Path "C:\WpdPack") { Remove-Item -Recurse -Force "C:\WpdPack" }
               Move-Item -Path "C:\WpdPack_4_1_2" -Destination "C:\WpdPack"
@@ -36,9 +50,10 @@ jobs:
       - name: Build Project
         shell: pwsh
         run: |
+          if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
           mkdir build
           cd build
-          qmake ..\PacketStorm_Sender.pro
+          qmake -spec win32-g++ ..\PacketStorm_Sender.pro
           mingw32-make -j2 release
 
       - name: Prepare Deployment
@@ -46,7 +61,6 @@ jobs:
         run: |
           mkdir deploy
           copy build\release\PacketStorm_Sender.exe deploy\
-          # windeployqt 自动拷贝 Qt 依赖库
           windeployqt --release --no-translations --compiler-runtime deploy\PacketStorm_Sender.exe
 
       - name: Upload Artifact
