@@ -1006,10 +1006,35 @@ extern "C" void start_socket_send_mode(const SocketConfig* config) {
             }
 
             if (connected) {
-                // 连接建立后，发送一次配置的载荷数据
-                int data_len = config->payload_len > 0 ? config->payload_len : 1;
-                std::vector<char> temp_buf(data_len, 'X');
-                send(sockfd, temp_buf.data(), data_len, 0);
+                // [增强] 连接建立后，根据配置发送载荷数据
+                int data_len = config->payload_len;
+                if (data_len <= 0) data_len = 1;
+                
+                std::vector<char> send_buf(data_len);
+                if (config->payload_mode == PAYLOAD_FIXED) {
+                    memset(send_buf.data(), config->fixed_byte_val, data_len);
+                } else if (config->payload_mode == PAYLOAD_CUSTOM && config->custom_data && config->custom_data_len > 0) {
+                    int filled = 0;
+                    while (filled < data_len) {
+                        int rem = data_len - filled;
+                        int copy = (rem > config->custom_data_len) ? config->custom_data_len : rem;
+                        memcpy(send_buf.data() + filled, config->custom_data, copy);
+                        filled += copy;
+                    }
+                } else { // 默认随机或 PAYLOAD_RANDOM
+                    for (int i = 0; i < data_len; ++i) send_buf[i] = get_random_byte();
+                }
+
+                send(sockfd, send_buf.data(), data_len, 0);
+                
+                // [新增] 如果开启了等待回复模式，则尝试接收一些数据
+                if (config->wait_for_reply) {
+                    char recv_buf[1024];
+                    // 设置接收超时，防止长时间阻塞
+                    int timeout = 1000; // 1秒超时
+                    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+                    recv(sockfd, recv_buf, sizeof(recv_buf), 0);
+                }
                 
                 local_sent++;
                 local_bytes += data_len;

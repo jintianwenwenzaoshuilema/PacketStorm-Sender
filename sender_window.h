@@ -240,6 +240,7 @@ class SocketWorker : public QObject {
     Q_OBJECT
   public:
     SocketConfig config;
+    QByteArray customDataBuffer; // [新增] 存储自定义载荷数据
 
     // 统计数据代理
     static void StatsCallbackProxy(uint64_t sent, uint64_t bytes, void* user_data) {
@@ -259,6 +260,14 @@ class SocketWorker : public QObject {
 
   public slots:
     void doWork() {
+        if (config.payload_mode == PAYLOAD_CUSTOM) {
+            config.custom_data = customDataBuffer.constData();
+            config.custom_data_len = customDataBuffer.length();
+        } else {
+            config.custom_data = nullptr;
+            config.custom_data_len = 0;
+        }
+
         config.stats_callback = &SocketWorker::StatsCallbackProxy;
         config.log_callback = &SocketWorker::LogCallbackProxy;
         config.user_data = this;

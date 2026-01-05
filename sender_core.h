@@ -117,6 +117,13 @@ struct SocketConfig {
     bool is_udp;
     bool is_connect_only;
     
+    // [新增] TCP 全会话模拟增强
+    bool wait_for_reply;        // 是否等待服务器回复数据
+    PayloadMode payload_mode;   // 载荷模式
+    unsigned char fixed_byte_val;
+    const char* custom_data;    // 自定义数据指针
+    int custom_data_len;        // 自定义数据长度
+    
     // [新增] 随机化选项
     bool use_random_src_port;
     bool use_random_src_mac;

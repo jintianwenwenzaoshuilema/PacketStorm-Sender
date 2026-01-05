@@ -889,11 +889,24 @@
                                                 <string notr="true">color: #FFB74D; font-weight: bold;</string>
                                             </property>
                                             <property name="text">
-                                                <string>Connect + Close Mode (Full Handshake)</string>
+                                                <string>TCP Full Session Simulation</string>
                                             </property>
                                             <property name="toolTip">
-                                                <string>建立完整的TCP三次握手后立即断开，形成完整的生命周期。
-这可以防止服务器因半开连接而重发 SYN-ACK。</string>
+                                                <string>完成 TCP 三次握手、发送数据并断开连接。
+支持自定义载荷和等待回复，更真实地模拟客户端会话。</string>
+                                            </property>
+                                        </widget>
+                                    </item>
+                                    <item>
+                                        <widget class="QCheckBox" name="chkSockWaitReply">
+                                            <property name="styleSheet">
+                                                <string notr="true">color: #4DB6AC; font-weight: bold;</string>
+                                            </property>
+                                            <property name="text">
+                                                <string>Wait for Server Reply</string>
+                                            </property>
+                                            <property name="toolTip">
+                                                <string>发送数据后等待服务器回复。这会让会话模拟更加真实。</string>
                                             </property>
                                         </widget>
                                     </item>

@@ -287,6 +287,7 @@ MainWindow::MainWindow(QWidget* parent)
     // 信号联动
     connect(ui->rbSockUdp, &QRadioButton::toggled, this, [this](bool checked) {
         ui->chkConnectFlood->setVisible(!checked);
+        ui->chkSockWaitReply->setVisible(!checked && ui->chkConnectFlood->isChecked()); // [新增]
         ui->sockRandomContainer->setVisible(!checked && ui->chkConnectFlood->isChecked());
     });
     // [修改] 联动逻辑：采用自动切换（Auto-Uncheck）模式，不再禁用按钮
@@ -311,6 +312,7 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_isLoadingConfig) return;
 
         ui->sockRandomContainer->setVisible(checked || ui->chkSockRandMac->isChecked() || ui->chkSockRandIp->isChecked());
+        ui->chkSockWaitReply->setVisible(checked); // [新增]
         
         if (checked) {
             // 如果勾选了完整握手，自动取消伪造选项的勾选
@@ -506,6 +508,18 @@ void MainWindow::onSockStartClicked(const QString& existingTaskId, bool startImm
     sw->config.is_udp = (protoName == "SOCK_UDP");
     
     sw->config.is_connect_only = ui->chkConnectFlood->isChecked();
+    sw->config.wait_for_reply = ui->chkSockWaitReply->isChecked();
+    
+    // [新增] 载荷配置
+    if (ui->rbPayFixed->isChecked()) sw->config.payload_mode = PAYLOAD_FIXED;
+    else if (ui->rbPayCustom->isChecked()) sw->config.payload_mode = PAYLOAD_CUSTOM;
+    else sw->config.payload_mode = PAYLOAD_RANDOM;
+    
+    sw->config.fixed_byte_val = (unsigned char)ui->spinFixVal->value();
+    if (sw->config.payload_mode == PAYLOAD_CUSTOM) {
+        sw->customDataBuffer = QByteArray::fromHex(ui->editCustomData->text().toUtf8());
+    }
+
     sw->config.use_random_src_port = ui->chkSockRandPort->isChecked();
     sw->config.use_random_src_mac = ui->chkSockRandMac->isChecked();
     sw->config.use_random_src_ip = ui->chkSockRandIp->isChecked();
@@ -2008,6 +2022,7 @@ void MainWindow::loadConfig() {
     
     // [新增] 恢复 Connect Flood 选项和随机化参数
     ui->chkConnectFlood->setChecked(settings.value("sock_config/is_connect_only", false).toBool());
+    ui->chkSockWaitReply->setChecked(settings.value("sock_config/wait_for_reply", false).toBool());
     ui->chkSockRandPort->setChecked(settings.value("sock_config/random_src_port", false).toBool());
     ui->chkSockRandMac->setChecked(settings.value("sock_config/random_src_mac", false).toBool());
     ui->chkSockRandIp->setChecked(settings.value("sock_config/random_src_ip", false).toBool());
@@ -2015,6 +2030,7 @@ void MainWindow::loadConfig() {
     ui->spinSockSPort->setValue(settings.value("sock_config/source_port", 0).toInt());
 
     ui->chkConnectFlood->setVisible(!ui->rbSockUdp->isChecked()); // 仅在非 UDP 时显示
+    ui->chkSockWaitReply->setVisible(!ui->rbSockUdp->isChecked() && ui->chkConnectFlood->isChecked()); // [新增]
     ui->sockRandomContainer->setVisible(!ui->rbSockUdp->isChecked() && ui->chkConnectFlood->isChecked());
 
     // Payload Size
@@ -2207,6 +2223,7 @@ void MainWindow::saveConfig() {
     
     // [新增] 保存 Connect Flood 选项和随机化参数
     settings.setValue("sock_config/is_connect_only", ui->chkConnectFlood->isChecked());
+    settings.setValue("sock_config/wait_for_reply", ui->chkSockWaitReply->isChecked());
     settings.setValue("sock_config/random_src_port", ui->chkSockRandPort->isChecked());
     settings.setValue("sock_config/random_src_mac", ui->chkSockRandMac->isChecked());
     settings.setValue("sock_config/random_src_ip", ui->chkSockRandIp->isChecked());
@@ -2853,6 +2870,19 @@ void MainWindow::setupTooltips() {
     if (ui->rbSockTcp) {
         ui->rbSockTcp->setToolTip("使用TCP协议发送（Socket模式）\n"
                                   "面向连接、可靠的传输");
+    }
+    if (ui->chkConnectFlood) {
+        ui->chkConnectFlood->setToolTip("TCP 全会话模拟模式：\n"
+                                        "1. 发起完整的三次握手建立连接\n"
+                                        "2. 根据载荷设置发送数据包\n"
+                                        "3. (可选) 等待服务器回复数据\n"
+                                        "4. 正常关闭连接 (发送 RST 释放资源)\n"
+                                        "这可以绕过简单的防火墙过滤，更真实地模拟业务流量。");
+    }
+    if (ui->chkSockWaitReply) {
+        ui->chkSockWaitReply->setToolTip("等待回复模式：\n"
+                                         "发送载荷后，会等待服务器返回数据再关闭连接。\n"
+                                         "这对于模拟 HTTP 请求等交互式协议非常有用。");
     }
     if (ui->spinSockLen) {
         ui->spinSockLen->setToolTip("Socket发送的载荷大小（字节）\n"
